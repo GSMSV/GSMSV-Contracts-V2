@@ -1,0 +1,26 @@
+name: 버그
+description: 잘못 동작하는 것을 알린다
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        보안 문제는 여기에 쓰지 말고 "보안 문제 신고"로 비공개로 알린다.
+        비밀값·내부 IP·포트 같은 운영 정보는 적지 않는다 (공개 저장소).
+  - type: textarea
+    id: what
+    attributes:
+      label: 무슨 일이 있었나
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 기대한 동작
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 재현 방법
+      placeholder: |
+        1.
+        2.

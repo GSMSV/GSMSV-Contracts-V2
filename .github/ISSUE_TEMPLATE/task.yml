@@ -1,0 +1,25 @@
+name: 작업·기능
+description: 해야 할 작업이나 새 기능을 적는다
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        비밀값·내부 IP·포트 같은 운영 정보는 적지 않는다 (공개 저장소).
+  - type: input
+    id: spec
+    attributes:
+      label: 관련 기능
+      description: 기능 번호와 이름을 함께 적는다
+      placeholder: 예) 23번 자원 이름 규칙
+  - type: textarea
+    id: what
+    attributes:
+      label: 무엇을
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: 완료 조건
+      description: 이게 되면 끝이라고 할 수 있는 문장 1~2개
