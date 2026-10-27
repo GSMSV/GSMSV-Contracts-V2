@@ -1,0 +1,19 @@
+# 기획 문서는 Notion에만 둔다 (팀 규칙)
+/docs/
+
+# 비밀값
+.env
+.env.*
+!.env.example
+
+# OS·IDE
+.DS_Store
+Thumbs.db
+.idea/
+*.iml
+.vscode/
+
+# Claude Code 개인 설정
+.claude/settings.local.json
+
+# 언어별 빌드 산출물(build/, node_modules/ 등)은 이 저장소 담당이 첫 코드를 만들 때 추가한다
