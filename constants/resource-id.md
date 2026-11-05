@@ -31,7 +31,7 @@
 
 | 대상 | 길이 | 경우의 수 |
 |---|---|---|
-| 서비스 자원, 사용자, 팀 | 12자 | 2^60 (약 1.15×10^18) |
+| 서비스 자원, 사용자, 팀, 팀에 딸린 기록(멤버·초대) | 12자 | 2^60 (약 1.15×10^18) |
 | 하위 자원 | 8자 | 2^40 |
 
 - 12자로 충분한 이유: id가 겹치면 서버가 다시 뽑으면 되므로 드물기만 하면 된다. id를 안다고 권한이 생기지 않고(모든 요청은 권한 판단을 거친다), 볼 수 없는 자원은 404로 숨긴다. 그래서 "알면 통과되는 값"(세션 id 등)에 요구하는 길이는 필요 없다
@@ -54,6 +54,17 @@
 |---|---|---|
 | `user` | 사용자 | `user-8hq2m5v7c3kx` |
 | `team` | 팀 | `team-4p8w2k9m1xza` |
+
+### 팀에 딸린 기록 (GRN이 없고 자기 id만 가진다)
+
+| 접두사 | 대상 | 예 |
+|---|---|---|
+| `mbr` | 팀 멤버십 (팀원 한 명) | `mbr-2x7c5v9bq4ta` |
+| `inv` | 팀 초대 | `inv-5r8t2y6w3kqm` |
+
+- 팀에는 GRN이 없어서 하위 자원 표기(`{부모 GRN}/{하위 id}`)를 쓸 수 없다. 그래서 하위 자원의 8자가 아니라 사용자·팀과 같은 12자로 둔다
+- API 경로에서는 팀 id와 함께 쓴다 (예: `/api/v2/teams/{team_id}/invitations/{invitation_id}`). 서버는 그 기록이 경로의 팀에 속하는지 확인하고, 아니면 404로 거절한다
+- 초대 링크에는 이 id가 아니라 별도 비밀 토큰을 쓴다 ([23번](../rules/resource-naming.md))
 
 ### 하위 자원 (부모 GRN과 함께 쓴다)
 
@@ -102,6 +113,8 @@
 | 하위 자원 표기 | `^grn:(user|team)-[0-9a-hjkmnp-tv-z]{12}:(vm|fn|db|app)-[0-9a-hjkmnp-tv-z]{12}/(snap|port|domain|fwrule|trigger|version|backup|service|env|deployment)-[0-9a-hjkmnp-tv-z]{8}$` |
 | 사용자 id | `^user-[0-9a-hjkmnp-tv-z]{12}$` |
 | 팀 id | `^team-[0-9a-hjkmnp-tv-z]{12}$` |
+| 멤버 id | `^mbr-[0-9a-hjkmnp-tv-z]{12}$` |
+| 초대 id | `^inv-[0-9a-hjkmnp-tv-z]{12}$` |
 | 하위 자원 id | `^(snap|port|domain|fwrule|trigger|version|backup|service|env|deployment)-[0-9a-hjkmnp-tv-z]{8}$` |
 
 - 하위 자원 표기는 한 단계만 받는다. 하위 id 뒤에 `/`가 더 오면 틀린 표기다

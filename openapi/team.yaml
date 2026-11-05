@@ -1,0 +1,617 @@
+openapi: 3.1.0
+info:
+  title: GSMSV v2 Team API
+  version: 0.1.0
+  description: |
+    팀 만들기, 내 팀 목록, 팀 상세, 거절된 팀 다시 신청, 팀원 초대, 보낸 초대 목록, 초대 취소, 초대 수락 (Team 3.1~3.8).
+
+    - 규칙의 원본은 [21번 팀과 역할](../rules/team-ownership.md)과 [22번 권한 판단](../rules/authorization.md)이다
+    - JSON 칸 이름은 snake_case, enum 값은 소문자다
+    - 오류 본문은 공통 형식 `{ code, message, request_id, details? }`다. 아래에 적지 않은 공통 오류(400·401·404)도 모든 API에 해당한다
+    - `permissions` 키는 동작 이름 형식이 확정될 때까지 서버의 동작 이름 소문자(`invite_member` 등)로 내보낸다 ([API 규칙 3장](../rules/api-rules.md))
+
+    팀 API가 쓰는 오류 `code`
+
+    | 상태 | code | 뜻 |
+    |---|---|---|
+    | 403 | `ACCESS_DENIED` | 팀원이지만 그 동작 권한이 없다 |
+    | 403 | `TEAM_NOT_APPROVED` | 팀 상태 때문에 할 수 없다 (거절된 팀의 초대 등) |
+    | 403 | `INVITATION_EMAIL_MISMATCH` | 로그인한 계정의 학교 이메일이 초대 대상과 다르다 |
+    | 404 | `RESOURCE_NOT_FOUND` | 팀이 없거나 팀원이 아니다. 초대가 없다 |
+    | 409 | `ALREADY_MEMBER` | 이미 팀원이다 |
+    | 409 | `CONFLICT` | 지금 상태에서는 할 수 없다 (거절 상태가 아닌 팀의 다시 신청 등) |
+    | 410 | `GONE` | 초대 토큰이 만료·사용·취소되었다 |
+servers:
+  - url: https://{host}
+    variables:
+      host:
+        default: example.com
+security:
+  - accessToken: []
+tags:
+  - name: Team
+    description: 팀 만들기·조회·다시 신청
+  - name: Team Invitation
+    description: 팀원 초대와 수락
+paths:
+  /api/v2/teams:
+    post:
+      tags: [Team]
+      operationId: createTeam
+      summary: 팀 만들기 (3.1)
+      description: |
+        팀을 `pending`(관리자 승인 대기)으로 만들고 만든 사람을 팀장으로 등록한다. 관리자가 만든 팀도 승인을 거친다.
+        승인 대기 중에도 초대와 팀장 넘기기는 할 수 있고, 막히는 것은 자원 생성뿐이다.
+
+        권한: 로그인한 사용자
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTeamRequest'
+            example:
+              name: GSMSV
+      responses:
+        '201':
+          description: 만들었다
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateTeamResponse'
+              example:
+                id: team-4p8w2k9m1xza
+                name: GSMSV
+                status: pending
+                my_role: leader
+                created_at: '2026-10-29T09:00:00Z'
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+    get:
+      tags: [Team]
+      operationId: listMyTeams
+      summary: 내 팀 목록 (3.2)
+      description: |
+        내가 속한 팀 목록을 준다. 최근에 만든 팀부터 준다.
+
+        권한: 로그인한 사용자 (소속 팀만)
+      parameters:
+        - $ref: './components/common.yaml#/components/parameters/Cursor'
+        - $ref: './components/common.yaml#/components/parameters/Limit'
+      responses:
+        '200':
+          description: 내 팀 목록
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TeamSummaryPage'
+              example:
+                items:
+                  - id: team-4p8w2k9m1xza
+                    name: GSMSV
+                    status: approved
+                    my_role: leader
+                    member_count: 4
+                next_cursor: null
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+  /api/v2/teams/{team_id}:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+    get:
+      tags: [Team]
+      operationId: getTeam
+      summary: 팀 상세 (3.3)
+      description: |
+        팀 정보, 팀원 목록, 팀 VM 할당량 사용량을 준다.
+        DB·앱 등 다른 서비스 사용량은 따로 받는다 (3.15).
+
+        권한: 팀원 전원, 관리자
+      responses:
+        '200':
+          description: 팀 상세
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TeamDetail'
+              example:
+                id: team-4p8w2k9m1xza
+                name: GSMSV
+                status: approved
+                rejection_reason: null
+                my_role: leader
+                members:
+                  - member_id: mbr-2x7c5v9bq4ta
+                    name: 홍길동
+                    email: student@example.com
+                    role: leader
+                    profile_image_url: null
+                  - member_id: mbr-9k3m7q2p5wzh
+                    name: 김철수
+                    email: student2@example.com
+                    role: devops
+                    profile_image_url: /api/v2/files/profile-images/1a2b3c4d5e6f.webp
+                quota:
+                  vm:
+                    vcpu: { used: 4, limit: 8 }
+                    ram_gib: { used: 8, limit: 16 }
+                    ssd_gib: { used: 40, limit: 60 }
+                permissions:
+                  invite_member: true
+                  remove_member: true
+                  grant_devops: true
+                  transfer_leader: true
+                  disband_team: true
+                  leave_team: true
+                  resubmit_team: false
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+  /api/v2/teams/{team_id}/resubmit:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+    post:
+      tags: [Team]
+      operationId: resubmitTeam
+      summary: 거절된 팀 다시 신청 (3.4)
+      description: |
+        거절된 팀을 고쳐서 다시 `pending`으로 돌린다. 거절 기록(사유)은 지우지 않고 모두 남긴다.
+
+        권한: 팀장 (동작 `resubmit_team`)
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResubmitTeamRequest'
+            example:
+              name: GSMSV 인프라
+      responses:
+        '200':
+          description: 다시 신청했다
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResubmitTeamResponse'
+              example:
+                id: team-4p8w2k9m1xza
+                status: pending
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '403':
+          $ref: './components/common.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+        '409':
+          description: 거절 상태가 아니다 (`CONFLICT`)
+          content:
+            application/json:
+              schema:
+                $ref: './components/common.yaml#/components/schemas/ErrorResponse'
+  /api/v2/teams/{team_id}/invitations:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+    post:
+      tags: [Team Invitation]
+      operationId: inviteMember
+      summary: 팀원 초대 (3.5)
+      description: |
+        학교 이메일 **전체**를 받는다. 그 이메일이 가입했는지와 관계없이 같은 202를 준다.
+        초대 메일의 링크에는 id가 아닌 별도 비밀 토큰이 들어가고, 보낸 뒤 7일이 지나면 만료된다.
+
+        - 승인 대기 팀은 초대할 수 있다. 거절된 팀은 403 `TEAM_NOT_APPROVED`
+        - 학교 이메일 도메인이 아니면 400 `VALIDATION_FAILED`. 형식만 보므로 가입 여부는 드러나지 않는다. 도메인 값은 서버 설정이다
+        - 같은 팀·같은 이메일로 대기 중인 초대가 있으면 새로 만들지 않는다. 토큰을 새로 만들고 만료를 7일로 다시 잡으며, 이전 링크는 바로 무효가 된다
+        - 이미 팀원인 이메일이면 409 `ALREADY_MEMBER`
+
+        권한: 팀장 (동작 `invite_member`)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InviteMemberRequest'
+            example:
+              email: student3@example.com
+      responses:
+        '202':
+          description: 초대를 보냈다 (가입 여부와 관계없이 같다)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              example:
+                message: 초대를 보냈습니다.
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '403':
+          $ref: './components/common.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+        '409':
+          description: 이미 팀원이다 (`ALREADY_MEMBER`)
+          content:
+            application/json:
+              schema:
+                $ref: './components/common.yaml#/components/schemas/ErrorResponse'
+    get:
+      tags: [Team Invitation]
+      operationId: listInvitations
+      summary: 보낸 초대 목록 (3.6)
+      description: |
+        수락·취소되지 않았고 만료되지 않은 초대를 준다. 최근에 보낸 초대부터 준다.
+
+        권한: 팀장 (동작 `invite_member`)
+      parameters:
+        - $ref: './components/common.yaml#/components/parameters/Cursor'
+        - $ref: './components/common.yaml#/components/parameters/Limit'
+      responses:
+        '200':
+          description: 보낸 초대 목록
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvitationPage'
+              example:
+                items:
+                  - id: inv-5r8t2y6w3kqm
+                    email: student3@example.com
+                    sent_at: '2026-10-29T09:00:00Z'
+                    expires_at: '2026-11-05T09:00:00Z'
+                next_cursor: null
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '403':
+          $ref: './components/common.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+  /api/v2/teams/{team_id}/invitations/{invitation_id}:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+      - $ref: '#/components/parameters/InvitationId'
+    delete:
+      tags: [Team Invitation]
+      operationId: cancelInvitation
+      summary: 초대 취소 (3.7)
+      description: |
+        아직 수락되지 않은 초대를 취소한다. 취소한 초대의 링크는 바로 무효가 된다.
+        초대가 없거나, 그 팀의 초대가 아니거나, 이미 수락·취소·만료되었으면 404다.
+
+        권한: 팀장 (동작 `invite_member`)
+      responses:
+        '204':
+          description: 취소했다
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '403':
+          $ref: './components/common.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+  /api/v2/invitations/accept:
+    post:
+      tags: [Team Invitation]
+      operationId: acceptInvitation
+      summary: 초대 수락 (3.8)
+      description: |
+        초대 메일 링크 → 프론트 → (로그인하지 않았으면 DataGSM 로그인, 처음이면 자동 가입) → 이 API.
+        일반 팀원으로 추가되고, 그 순간부터 콘솔에 팀 자원이 나타난다. DevOps 역할은 팀장이 따로 준다.
+
+        - 토큰이 없거나 만료(7일)·사용·취소되었으면 410 `GONE`. 거절로 취소된 초대도 같다
+        - 로그인한 계정의 학교 이메일이 초대 대상과 다르면 403 `INVITATION_EMAIL_MISMATCH`. 링크를 넘겨받은 사람이 들어오는 것을 막는다
+        - 이미 팀원이면 409 `ALREADY_MEMBER`
+
+        권한: 로그인한 사용자 (토큰 소지자. 동작 이름 없음)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AcceptInvitationRequest'
+            example:
+              token: q8Zp3kLx9exampletoken
+      responses:
+        '200':
+          description: 팀에 들어왔다
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AcceptInvitationResponse'
+              example:
+                team:
+                  id: team-4p8w2k9m1xza
+                  name: GSMSV
+                my_role: member
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '403':
+          description: 초대 대상 이메일과 다르다 (`INVITATION_EMAIL_MISMATCH`)
+          content:
+            application/json:
+              schema:
+                $ref: './components/common.yaml#/components/schemas/ErrorResponse'
+        '409':
+          description: 이미 팀원이다 (`ALREADY_MEMBER`)
+          content:
+            application/json:
+              schema:
+                $ref: './components/common.yaml#/components/schemas/ErrorResponse'
+        '410':
+          description: 토큰이 없거나 만료·사용·취소되었다 (`GONE`)
+          content:
+            application/json:
+              schema:
+                $ref: './components/common.yaml#/components/schemas/ErrorResponse'
+components:
+  securitySchemes:
+    accessToken:
+      $ref: './components/common.yaml#/components/securitySchemes/accessToken'
+  parameters:
+    TeamId:
+      name: team_id
+      in: path
+      required: true
+      description: 팀 id. 형식이 틀리면 400 `INVALID_RESOURCE_ID`
+      schema:
+        type: string
+        pattern: '^team-[0-9a-hjkmnp-tv-z]{12}$'
+      example: team-4p8w2k9m1xza
+    InvitationId:
+      name: invitation_id
+      in: path
+      required: true
+      description: 초대 id. 형식이 틀리면 400 `INVALID_RESOURCE_ID`
+      schema:
+        type: string
+        pattern: '^inv-[0-9a-hjkmnp-tv-z]{12}$'
+      example: inv-5r8t2y6w3kqm
+  schemas:
+    TeamName:
+      type: string
+      minLength: 1
+      maxLength: 30
+      description: 앞뒤 공백을 지운 뒤 1~30자. 다른 팀과 겹쳐도 된다
+    TeamStatus:
+      type: string
+      enum: [pending, approved, rejected]
+      description: |
+        `pending` 관리자 승인 대기, `approved` 승인됨, `rejected` 거절됨.
+        해체 요청 중 상태는 해체 API를 명세할 때 더한다
+    TeamRole:
+      type: string
+      enum: [leader, devops, member]
+    CreateTeamRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          $ref: '#/components/schemas/TeamName'
+    CreateTeamResponse:
+      type: object
+      required: [id, name, status, my_role, created_at]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        status:
+          $ref: '#/components/schemas/TeamStatus'
+        my_role:
+          $ref: '#/components/schemas/TeamRole'
+        created_at:
+          type: string
+          format: date-time
+    TeamSummary:
+      type: object
+      required: [id, name, status, my_role, member_count]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        status:
+          $ref: '#/components/schemas/TeamStatus'
+        my_role:
+          $ref: '#/components/schemas/TeamRole'
+        member_count:
+          type: integer
+          minimum: 1
+    TeamSummaryPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/TeamSummary'
+        next_cursor:
+          type: [string, 'null']
+    TeamMember:
+      type: object
+      required: [member_id, name, email, role, profile_image_url]
+      description: 팀원에게 보이는 것은 이름·사진·팀 안 역할·학교 이메일뿐이다. 학년·반·번호·전공·사용자 id는 넣지 않는다
+      properties:
+        member_id:
+          type: string
+          pattern: '^mbr-[0-9a-hjkmnp-tv-z]{12}$'
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+        role:
+          $ref: '#/components/schemas/TeamRole'
+        profile_image_url:
+          type: [string, 'null']
+    QuotaUsage:
+      type: object
+      required: [used, limit]
+      properties:
+        used:
+          type: integer
+          minimum: 0
+        limit:
+          type: integer
+          minimum: 0
+    TeamQuota:
+      type: object
+      required: [vm]
+      description: VM 할당량만 담는다. RAM·SSD 값의 단위는 GiB다 ([27번 5장](../policies/quota.md))
+      properties:
+        vm:
+          type: object
+          required: [vcpu, ram_gib, ssd_gib]
+          properties:
+            vcpu:
+              $ref: '#/components/schemas/QuotaUsage'
+            ram_gib:
+              $ref: '#/components/schemas/QuotaUsage'
+            ssd_gib:
+              $ref: '#/components/schemas/QuotaUsage'
+    TeamPermissions:
+      type: object
+      description: 요청자가 이 팀에 할 수 있는 동작. 프론트는 버튼을 숨기는 데만 쓴다
+      required: [invite_member, remove_member, grant_devops, transfer_leader, disband_team, leave_team, resubmit_team]
+      properties:
+        invite_member:
+          type: boolean
+        remove_member:
+          type: boolean
+        grant_devops:
+          type: boolean
+        transfer_leader:
+          type: boolean
+        disband_team:
+          type: boolean
+        leave_team:
+          type: boolean
+        resubmit_team:
+          type: boolean
+      additionalProperties:
+        type: boolean
+    TeamDetail:
+      type: object
+      required: [id, name, status, rejection_reason, my_role, members, quota, permissions]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        status:
+          $ref: '#/components/schemas/TeamStatus'
+        rejection_reason:
+          type: [string, 'null']
+          description: 가장 최근 거절 사유. `rejected`가 아니면 null
+        my_role:
+          description: 요청자의 팀 안 역할. 팀원이 아닌 관리자면 null
+          oneOf:
+            - $ref: '#/components/schemas/TeamRole'
+            - type: 'null'
+        members:
+          type: array
+          items:
+            $ref: '#/components/schemas/TeamMember'
+        quota:
+          description: 팀 할당량은 승인되면 적용되므로, `approved`가 아니면 null
+          oneOf:
+            - $ref: '#/components/schemas/TeamQuota'
+            - type: 'null'
+        permissions:
+          $ref: '#/components/schemas/TeamPermissions'
+    ResubmitTeamRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          $ref: '#/components/schemas/TeamName'
+          description: 고친 팀 이름. 없으면 그대로 둔다
+    ResubmitTeamResponse:
+      type: object
+      required: [id, status]
+      properties:
+        id:
+          type: string
+        status:
+          $ref: '#/components/schemas/TeamStatus'
+    InviteMemberRequest:
+      type: object
+      additionalProperties: false
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+          description: 학교 이메일 전체. 부분 검색·자동완성 없음
+    MessageResponse:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+    Invitation:
+      type: object
+      required: [id, email, sent_at, expires_at]
+      properties:
+        id:
+          type: string
+          pattern: '^inv-[0-9a-hjkmnp-tv-z]{12}$'
+        email:
+          type: string
+          format: email
+        sent_at:
+          type: string
+          format: date-time
+          description: 마지막으로 보낸 시각. 다시 초대하면 바뀐다
+        expires_at:
+          type: string
+          format: date-time
+    InvitationPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Invitation'
+        next_cursor:
+          type: [string, 'null']
+    AcceptInvitationRequest:
+      type: object
+      additionalProperties: false
+      required: [token]
+      properties:
+        token:
+          type: string
+          minLength: 1
+          description: 초대 링크의 비밀 토큰
+    AcceptInvitationResponse:
+      type: object
+      required: [team, my_role]
+      properties:
+        team:
+          type: object
+          required: [id, name]
+          properties:
+            id:
+              type: string
+            name:
+              type: string
+        my_role:
+          $ref: '#/components/schemas/TeamRole'
