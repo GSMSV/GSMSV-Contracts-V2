@@ -1,6 +1,6 @@
 # 자원 식별자 상수 (접두사·글자·길이)
 
-> 상태: 아래 **값은 확정**이다. 이 값을 파일로 두는 형식과, 값에서 Kotlin·Go·React 상수를 만드는 방법은 **아직 정하지 않았다** (백엔드·프론트엔드·Go 담당이 정한다).
+> 상태: 아래 **값과 정규식은 확정**이다. 이 값을 파일로 두는 형식과, 값에서 Kotlin·Go·React 상수를 만드는 방법은 **아직 정하지 않았다** (백엔드·프론트엔드·Go 담당이 정한다).
 >
 > 함께 읽을 문서: [23번(자원 이름 규칙) — resource-naming.md](../rules/resource-naming.md)
 
@@ -92,6 +92,22 @@
 - GRN 문자열을 코드에서 직접 자르지 않는다. GRN 파서만 쓴다
 - GRN 파서는 엄격한 정규식으로 **문자열 전체**를 검사하고, 통과하지 못하면 거절한다. 파서는 자원 id만 돌려주고 소유자 칸의 값은 파서 밖으로 꺼내지 않는다 (소유자 칸으로 권한을 판단하는 사고를 구조로 막는 장치다. [23번 문서](../rules/resource-naming.md) 3장)
 
+### 정규식
+
+파서는 아래 정규식으로 문자열 **전체**를 검사한다. `[0-9a-hjkmnp-tv-z]`는 1장의 글자 32개다. 접두사 목록은 3장 표와 같다.
+
+| 대상 | 정규식 |
+|---|---|
+| 서비스 자원 GRN | `^grn:(user|team)-[0-9a-hjkmnp-tv-z]{12}:(vm|fn|db|app)-[0-9a-hjkmnp-tv-z]{12}$` |
+| 하위 자원 표기 | `^grn:(user|team)-[0-9a-hjkmnp-tv-z]{12}:(vm|fn|db|app)-[0-9a-hjkmnp-tv-z]{12}/(snap|port|domain|fwrule|trigger|version|backup|service|env|deployment)-[0-9a-hjkmnp-tv-z]{8}$` |
+| 사용자 id | `^user-[0-9a-hjkmnp-tv-z]{12}$` |
+| 팀 id | `^team-[0-9a-hjkmnp-tv-z]{12}$` |
+| 하위 자원 id | `^(snap|port|domain|fwrule|trigger|version|backup|service|env|deployment)-[0-9a-hjkmnp-tv-z]{8}$` |
+
+- 하위 자원 표기는 한 단계만 받는다. 하위 id 뒤에 `/`가 더 오면 틀린 표기다
+- 하위 자원이 그 부모 종류에 붙을 수 있는지(3장 하위 자원 표의 "부모" 칸)는 정규식이 아니라 **파서**가 정규식 검사 직후에 검사한다. 맞지 않으면 형식 오류로 거절한다. DB를 보기 전이라 자원 존재 여부가 드러나지 않는다
+- 원터치 배포의 앱 접두사는 `app`이다 (`deploy`가 아니다)
+
 ## 6. 맞는 id와 틀린 id
 
 | id | 판정 | 이유 |
@@ -104,8 +120,25 @@
 | `k3m9x2p7q4ta` | 틀림 | 접두사가 없다 |
 | `vm_k3m9x2p7q4ta` | 틀림 | 구분자는 하이픈이다 (Kubernetes·Proxmox 이름 규칙과 맞추기 위해 밑줄은 쓰지 않는다) |
 
+### GRN과 하위 자원 표기
+
+| 값 | 판정 | 이유 |
+|---|---|---|
+| `grn:team-4p8w2k9m1xza:vm-k3m9x2p7q4ta` | 맞음 | 서비스 자원 GRN |
+| `grn:user-8hq2m5v7c3kx:fn-6d2r8t5y3n7e` | 맞음 | 개인 소유 서비스 자원 GRN |
+| `grn:team-4p8w2k9m1xza:vm-k3m9x2p7q4ta/snap-7qz3m8k2` | 맞음 | 하위 자원 표기 |
+| `grn:team-4p8w2k9m1xza:app-k3m9x2p7q4ta/domain-4k8m2q9t` | 맞음 | `domain`은 앱에도 붙는다 |
+| `grn:vm-k3m9x2p7q4ta:vm-k3m9x2p7q4ta` | 틀림 | 소유자 칸이 `user-`·`team-`가 아니다 |
+| `grn:team-4p8w2k9m1xza:vm-k3m9x2p7` | 틀림 | 자원 칸에 8자 id |
+| `grn:team-4p8w2k9m1xza:vm-k3m9x2p7q4ta/snap-7qz3m8k2/port-5q8w3n7z` | 틀림 | 하위 자원 두 단계 |
+| `GRN:team-4p8w2k9m1xza:vm-k3m9x2p7q4ta` | 틀림 | 대문자 |
+| `"grn:team-4p8w2k9m1xza:vm-k3m9x2p7q4ta "` | 틀림 | 끝에 공백 (따옴표는 공백을 보이게 하려고 붙였다) |
+| `grn:team-4p8w2k9m1xza:deploy-k3m9x2p7q4ta` | 틀림 | `deploy`는 없는 접두사다 |
+| `grn:team-4p8w2k9m1xza:fn-6d2r8t5y3n7e/snap-7qz3m8k2` | 틀림 | `snap`은 VM에만 붙는다 |
+
+- 각 저장소의 GRN·id 파서 테스트는 이 장의 목록을 그대로 쓴다
+
 ## 7. 아직 정하지 않은 것
 
 - 이 값을 담는 파일 형식, 세 언어의 상수를 만드는 방법, 생성한 코드를 저장소에 커밋할지
-- 정규식을 어떤 표기로 둘지 (이 문서의 값 표가 기준이다)
 - 사용자가 정하는 이름(`name`)의 글자·길이·예약어 규칙 (백엔드 담당)
