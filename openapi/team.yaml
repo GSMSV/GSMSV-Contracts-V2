@@ -138,8 +138,8 @@ paths:
                 quota:
                   vm:
                     vcpu: { used: 4, limit: 8 }
-                    ram_gib: { used: 8, limit: 16 }
-                    ssd_gib: { used: 40, limit: 60 }
+                    ram_gb: { used: 8, limit: 16 }
+                    ssd_gb: { used: 40, limit: 60 }
                 permissions:
                   invite_member: true
                   remove_member: true
@@ -473,17 +473,17 @@ components:
     TeamQuota:
       type: object
       required: [vm]
-      description: VM 할당량만 담는다. RAM·SSD 값의 단위는 GiB다 ([27번 5장](../policies/quota.md))
+      description: VM 할당량만 담는다. 칸 이름은 `_gb`지만 RAM·SSD 값은 1024 단위(GiB)다 ([27번 5장](../policies/quota.md))
       properties:
         vm:
           type: object
-          required: [vcpu, ram_gib, ssd_gib]
+          required: [vcpu, ram_gb, ssd_gb]
           properties:
             vcpu:
               $ref: '#/components/schemas/QuotaUsage'
-            ram_gib:
+            ram_gb:
               $ref: '#/components/schemas/QuotaUsage'
-            ssd_gib:
+            ssd_gb:
               $ref: '#/components/schemas/QuotaUsage'
     TeamPermissions:
       type: object
