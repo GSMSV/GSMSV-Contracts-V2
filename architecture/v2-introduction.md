@@ -166,7 +166,7 @@ V1의 운영 방식은 이어서 쓸 수 있는 부분이 많다. 아래는 **�
   - 볼 수 없는 자원을 403으로 답하지 않는다. 볼 수 없으면 404, 볼 수는 있지만 권한이 없으면 403이다
   - 응답에 노드·VM 번호 같은 구현 값을 넣지 않는다
   - 부모 GRN 없이 하위 자원 id만으로 찾는 API를 만들지 않는다
-- **아직 정해지지 않은 것(미정)**: 팀 이름 규칙, 초대 같은 팀 쪽 항목의 형식, 동작 이름과 `permissions`, 감사 로그, Server ↔ Infra 사이 형식 ([권한 판단](../rules/authorization.md) 9장, [Kotlin·Go 경계](../policies/kotlin-go-boundary.md))
+- **아직 정해지지 않은 것(미정)**: 동작 이름과 `permissions`, 감사 로그, Server ↔ Infra 사이 형식 ([권한 판단](../rules/authorization.md) 9장, [Kotlin·Go 경계](../policies/kotlin-go-boundary.md))
 
 ### 7.3 DevOps·인프라 (Go)
 
