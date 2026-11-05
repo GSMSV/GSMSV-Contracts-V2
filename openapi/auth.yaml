@@ -1,0 +1,256 @@
+openapi: 3.1.0
+info:
+  title: GSMSV v2 Auth API
+  version: 0.1.0
+  description: |
+    Auth 1.1~1.5: DataGSM 로그인 시작·콜백, 임시 코드 교환, 토큰 갱신, 로그아웃. 1.6 비상 로그인은 W5에서 따로 쓴다.
+
+    ## 토큰
+    - **액세스 토큰**: 이 서버가 발급한 HS256 JWT. 수명 15분. `access_token` 쿠키로 심는다.
+      API는 `Authorization: Bearer` 헤더를 먼저 보고, 없으면 `access_token` 쿠키를 쓴다.
+      다른 사이트 요청(`Sec-Fetch-Site: cross-site`)에는 쿠키를 쓰지 않는다
+    - **리프레시 토큰**: 불투명한 무작위 값. 서버는 해시만 DB에 저장한다. 수명 7일. 갱신(1.4)할 때마다 새로 발급하고 이전 것은 바로 폐기한다(회전).
+      로그아웃·탈퇴·계정 비활성·관리자 회수는 DB의 리프레시 토큰을 폐기하는 같은 구조로 처리한다
+    - DataGSM 토큰은 로그인할 때 신원 확인에만 쓰고 클라이언트에 주지 않는다
+
+    ## 쿠키
+    | 이름 | 속성 | 수명 |
+    |---|---|---|
+    | `access_token` | `HttpOnly; Secure; SameSite=Lax; Path=/` | `Max-Age=900` (15분) |
+    | `refresh_token` | `HttpOnly; Secure; SameSite=Lax; Path=/api/v2/auth` | `Max-Age=604800` (7일) |
+
+    ## 요청 제한
+    1.1·1.2·1.3은 IP마다 분당 10회로 제한한다. 제한은 C10(W3)에서 붙인다. 그 전에는 `RATE_LIMITED`가 나오지 않는다.
+
+    ## role 표기
+    응답의 `role`은 소문자(`user`, `admin`)다.
+servers:
+  - url: https://{host}
+    variables:
+      host:
+        default: api.example.com
+tags:
+  - name: auth
+    description: 로그인·토큰 갱신·로그아웃
+paths:
+  /api/v2/auth/datagsm/authorize:
+    get:
+      tags: [auth]
+      operationId: startDatagsmLogin
+      summary: 1.1 DataGSM 로그인 시작
+      description: |
+        1회용 검증값(`state`)을 만들어 5분간 보관하고 DataGSM 로그인 화면으로 보낸다. 인증 없이 부른다.
+        `redirect`는 `state`와 함께 보관했다가 1.3 응답으로 돌려준다.
+      security: []
+      parameters:
+        - name: redirect
+          in: query
+          required: false
+          description: |
+            로그인 뒤 돌아갈 프론트 경로. `/`로 시작하고 `//`·`/\`로 시작하지 않는 상대 경로만 받는다 (열린 리다이렉트 방지).
+            규칙에 맞지 않거나 없으면 `/`로 본다
+          schema:
+            type: string
+            example: /teams
+      responses:
+        '302':
+          description: DataGSM 인가 화면으로 보낸다. 주소는 DataGSM 클라이언트 등록 정보로 정해진다
+          headers:
+            Location:
+              schema:
+                type: string
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /api/v2/auth/datagsm/callback:
+    get:
+      tags: [auth]
+      operationId: handleDatagsmCallback
+      summary: 1.2 DataGSM 콜백 처리
+      description: |
+        검증값을 확인하고 바로 지운 뒤, 인가 코드를 DataGSM 토큰으로 바꿔 사용자 정보를 받는다.
+        일반 사용자는 재학 여부를 매번 확인하고(관리자는 확인하지 않는다), 계정이 없으면 만든다. 학교 정보는 로그인할 때마다 DataGSM 값으로 덮어쓴다.
+        서비스 토큰은 주소창에 내놓지 않고 60초짜리 1회용 임시 코드만 프론트로 넘긴다.
+
+        브라우저 리다이렉트 흐름이라 **실패도 JSON이 아니라 302**로 `{프론트}/login?error={code}`에 보낸다. `code` 목록은 `CallbackErrorCode`에 있다.
+        `{프론트}`는 서버 설정의 프론트 주소다.
+      security: []
+      parameters:
+        - name: code
+          in: query
+          required: true
+          description: DataGSM 인가 코드
+          schema:
+            type: string
+        - name: state
+          in: query
+          required: true
+          description: 1.1에서 만든 검증값
+          schema:
+            type: string
+      responses:
+        '302':
+          description: |
+            성공: `Location: {프론트}/login/callback?code={임시 코드}`
+            실패: `Location: {프론트}/login?error={CallbackErrorCode}`
+          headers:
+            Location:
+              schema:
+                type: string
+              example: https://console.example.com/login/callback?code=tmp_9Qk2x7Lm4P
+  /api/v2/auth/token-exchange:
+    post:
+      tags: [auth]
+      operationId: exchangeLoginCode
+      summary: 1.3 임시 코드를 토큰 쿠키로 교환
+      description: 임시 코드를 소모하고 `access_token`·`refresh_token` 쿠키를 심는다. 인증 없이 부른다
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenExchangeRequest'
+      responses:
+        '200':
+          description: 로그인 성공
+          headers:
+            Set-Cookie:
+              description: '`access_token`과 `refresh_token` 두 개를 심는다 (속성은 문서 앞의 쿠키 표)'
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenExchangeResponse'
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '410':
+          description: 이미 쓴 코드이거나, 60초가 지났거나, 없는 코드다 (`GONE`). 셋을 구분하지 않는다
+          content:
+            application/json:
+              schema:
+                $ref: './components/common.yaml#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /api/v2/auth/refresh:
+    post:
+      tags: [auth]
+      operationId: refreshTokens
+      summary: 1.4 로그인 상태 갱신
+      description: |
+        `refresh_token` 쿠키를 검증하고 새 액세스 토큰·리프레시 토큰을 쿠키로 다시 심는다. 이전 리프레시 토큰은 바로 폐기한다.
+        액세스 토큰이 만료된 상태에서 부르는 API라 **액세스 토큰 없이 부른다** (리프레시 토큰으로 검증한다).
+        일반 사용자는 이때도 재학 여부를 확인한다. 실패(401·403)하면 두 쿠키를 지운다.
+      security: []
+      parameters:
+        - name: refresh_token
+          in: cookie
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: 갱신 성공. 두 쿠키를 새 값으로 심는다
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+        '401':
+          description: 리프레시 토큰이 없거나, 만료·위조·폐기되었다 (`UNAUTHENTICATED`). 다시 로그인한다
+          content:
+            application/json:
+              schema:
+                $ref: './components/common.yaml#/components/schemas/ErrorResponse'
+        '403':
+          description: 일반 사용자인데 재학생이 아니다 (`NOT_ENROLLED`)
+          content:
+            application/json:
+              schema:
+                $ref: './components/common.yaml#/components/schemas/ErrorResponse'
+        '503':
+          description: 학생 정보 서비스가 응답하지 않는다 (`UPSTREAM_UNAVAILABLE`). 일반 사용자는 거부한다
+          content:
+            application/json:
+              schema:
+                $ref: './components/common.yaml#/components/schemas/ErrorResponse'
+  /api/v2/auth/logout:
+    post:
+      tags: [auth]
+      operationId: logout
+      summary: 1.5 로그아웃
+      description: |
+        `refresh_token` 쿠키의 리프레시 토큰을 DB에서 폐기하고 두 쿠키를 지운다. 액세스 토큰 없이 부른다.
+        쿠키가 없거나 이미 폐기된 토큰이어도 오류 없이 204다.
+        이미 발급한 액세스 토큰은 서버에 상태가 없어 수명(15분)이 끝날 때까지 유효하다.
+      security: []
+      parameters:
+        - name: refresh_token
+          in: cookie
+          required: false
+          schema:
+            type: string
+      responses:
+        '204':
+          description: 로그아웃 완료. 두 쿠키를 지운다 (`Max-Age=0`)
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+components:
+  responses:
+    RateLimited:
+      description: IP마다 분당 10회를 넘었다 (`RATE_LIMITED`). C10에서 붙인다
+      content:
+        application/json:
+          schema:
+            $ref: './components/common.yaml#/components/schemas/ErrorResponse'
+  schemas:
+    TokenExchangeRequest:
+      type: object
+      additionalProperties: false
+      required: [code]
+      properties:
+        code:
+          type: string
+          description: 1.2가 넘긴 임시 코드. 1회용, 60초
+          example: tmp_9Qk2x7Lm4P
+    TokenExchangeResponse:
+      type: object
+      required: [user, redirect]
+      properties:
+        user:
+          $ref: '#/components/schemas/LoginUser'
+        redirect:
+          type: string
+          description: 1.1에서 받은 `redirect`. 없었거나 규칙에 맞지 않았으면 `/`
+          example: /teams
+    LoginUser:
+      type: object
+      required: [id, name, role]
+      properties:
+        id:
+          type: string
+          example: user-8hq2m5v7c3kx
+        name:
+          type: string
+          example: 홍길동
+        role:
+          type: string
+          enum: [user, admin]
+    CallbackErrorCode:
+      type: string
+      description: 1.2 실패 때 `{프론트}/login?error=` 뒤에 붙는 값
+      enum:
+        - OAUTH_STATE_INVALID
+        - OAUTH_EXCHANGE_FAILED
+        - NOT_ENROLLED
+        - UPSTREAM_UNAVAILABLE
+        - ACCOUNT_INACTIVE
+        - RATE_LIMITED
+      x-enum-descriptions:
+        OAUTH_STATE_INVALID: 검증값이 없거나 5분이 지났다. 다시 로그인한다
+        OAUTH_EXCHANGE_FAILED: 토큰 교환·사용자 정보 조회에 실패했거나 이메일을 받지 못했다
+        NOT_ENROLLED: 일반 사용자인데 재학생이 아니다 (졸업생 포함)
+        UPSTREAM_UNAVAILABLE: 학생 정보 서비스가 응답하지 않는다. 일반 사용자는 거부한다
+        ACCOUNT_INACTIVE: 비활성 계정이다
+        RATE_LIMITED: IP마다 분당 10회를 넘었다 (C10에서 붙인다)

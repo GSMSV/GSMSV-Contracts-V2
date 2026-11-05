@@ -1,0 +1,90 @@
+# 여러 명세 파일이 함께 쓰는 공통 컴포넌트.
+# 각 명세 파일은 `./components/common.yaml#/components/...`로 가리킨다.
+openapi: 3.1.0
+info:
+  title: GSMSV v2 공통 컴포넌트
+  version: 0.1.0
+paths: {}
+components:
+  securitySchemes:
+    accessToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        이 서버가 발급한 액세스 토큰(HS256 JWT). `Authorization: Bearer` 헤더를 먼저 보고,
+        없으면 `access_token` 쿠키에서 꺼낸다. 다른 사이트 요청(`Sec-Fetch-Site: cross-site`)에는 쿠키를 쓰지 않는다.
+  parameters:
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: 이전 응답의 `next_cursor`. 내용을 해석하지 않고 그대로 보낸다
+      schema:
+        type: string
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [code, message, request_id]
+      properties:
+        code:
+          type: string
+          description: 오류 종류. 대문자와 밑줄 (예 `RESOURCE_NOT_FOUND`)
+        message:
+          type: string
+          description: 사람이 읽는 한국어 설명. 화면에 그대로 보여도 된다
+        request_id:
+          type: string
+          description: 서버 기록을 찾을 때 쓰는 요청 id
+        details:
+          type: object
+          additionalProperties: true
+          description: 오류마다 다른 추가 정보. 없으면 빠진다
+    FieldErrorDetail:
+      type: object
+      required: [reason]
+      properties:
+        field:
+          type: string
+          description: 요청 JSON의 경로 (snake_case). 객체 단위 검증 실패면 빠진다
+        reason:
+          type: string
+  responses:
+    BadRequest:
+      description: |
+        요청 형식 오류. `code`는 `INVALID_REQUEST`, `VALIDATION_FAILED`(`details.fields[]`에 `FieldErrorDetail`),
+        `UNKNOWN_FIELD`, `INVALID_CURSOR`, `INVALID_GRN`, `INVALID_RESOURCE_ID`, `GRN_RESOURCE_TYPE_MISMATCH` 중 하나다
+        ([API 규칙 4장](../../rules/api-rules.md))
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthenticated:
+      description: 인증 토큰이 없거나 유효하지 않다 (`UNAUTHENTICATED`)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Forbidden:
+      description: |
+        볼 수는 있지만 그 동작 권한이 없다 (`ACCESS_DENIED`). `details.required_role`에 필요한 범위,
+        `details.actor_role`에 요청자의 역할이 들어간다. 승인되지 않은 팀이면 `TEAM_NOT_APPROVED`
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: 자원이 없거나 볼 수 없다 (`RESOURCE_NOT_FOUND`). 둘을 구분하지 않는다
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
