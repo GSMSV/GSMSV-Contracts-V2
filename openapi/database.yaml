@@ -1,0 +1,791 @@
+openapi: 3.1.0
+info:
+  title: GSMSV v2 Database API
+  version: 0.1.0
+  description: |
+    데이터베이스 목록·상세, 발급, 접속 정보, 비밀번호 교체, 이름 수정, 삭제, 사용 기간 연장, 백업 (Database 7.1~7.12)과
+    관리자의 삭제된 DB 되살리기 (11.12).
+
+    - 규칙의 원본은 [24번 DBaaS](../services/database.md), [22번 권한 판단](../rules/authorization.md), [23번 자원 이름 규칙](../rules/resource-naming.md)이다
+    - JSON 칸 이름은 snake_case, enum 값은 소문자다
+    - 오류 본문은 공통 형식 `{ code, message, request_id, details? }`다. 아래에 적지 않은 공통 오류(400·401·404)도 모든 API에 해당한다
+    - `permissions` 키는 동작 이름 형식이 확정될 때까지 서버의 동작 이름 소문자로 내보낸다 ([API 규칙 3장](../rules/api-rules.md))
+    - 1차 범위는 공유형이다. 전용형 신청과 웹 쿼리 콘솔은 이 파일에 없다
+
+    데이터베이스 API가 쓰는 오류 `code`
+
+    | 상태 | code | 뜻 |
+    |---|---|---|
+    | 400 | `CONFIRMATION_MISMATCH` | 확인용 이름이 DB 이름과 다르다 |
+    | 403 | `ACCESS_DENIED` | 볼 수는 있지만 그 동작 권한이 없다 (일반 팀원의 삭제·복원 등) |
+    | 403 | `TEAM_NOT_APPROVED` | 승인 대기·거절된 팀은 DB를 만들 수 없다 |
+    | 409 | `NOT_SUPPORTED_FOR_DEDICATED` | 전용형에서는 지원하지 않는 동작이다 |
+    | 409 | `EXTENSION_NOT_YET_AVAILABLE` | 아직 연장할 수 있는 시기가 아니다 |
+    | 422 | `QUOTA_EXCEEDED` | 개수 한도 초과. `details`에 한도와 쓰는 개수 |
+    | 422 | `WRITE_LOCKED_OWNER` | 용량 초과로 쓰기 금지 상태인 소유자는 새 DB를 만들 수 없다 |
+servers:
+  - url: https://{host}
+    variables:
+      host:
+        default: example.com
+security:
+  - accessToken: []
+tags:
+  - name: Database
+    description: DB 조회·발급·설정·삭제
+  - name: Database Credentials
+    description: 접속 정보와 비밀번호
+  - name: Database Backup
+    description: 백업 목록·내려받기·복원
+  - name: Admin Database
+    description: 관리자 전용
+paths:
+  /api/v2/databases:
+    get:
+      tags: [Database]
+      operationId: listDatabases
+      summary: DB 목록 (7.1)
+      description: |
+        내가 볼 수 있는 DB 목록을 준다. 볼 수 없는 DB는 나오지 않는다.
+
+        권한: 로그인한 사용자 (개인 본인 / 팀 팀원 전원)
+      parameters:
+        - name: owner
+          in: query
+          required: false
+          description: '`me` 또는 `team-…`. 없으면 볼 수 있는 DB 전부. 볼 수 없는 팀이면 빈 목록이 아니라 404다'
+          schema:
+            type: string
+            examples: [me, team-4p8w2k9m1xza]
+        - $ref: './components/common.yaml#/components/parameters/Cursor'
+        - $ref: './components/common.yaml#/components/parameters/Limit'
+      responses:
+        '200':
+          description: DB 목록
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DatabaseSummaryPage'
+              example:
+                items:
+                  - grn: 'grn:team-4p8w2k9m1xza:db-k3m9x2p7q4ta'
+                    name: 주문 서비스 DB
+                    engine: mysql
+                    isolation: shared
+                    status: active
+                    write_locked: false
+                    storage: { used_gb: 0.12 }
+                    expires_at: '2027-02-28T00:00:00Z'
+                next_cursor: null
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+    post:
+      tags: [Database]
+      operationId: createPersonalDatabase
+      summary: 개인 DB 발급 (7.2)
+      description: |
+        공유 DB 서버에 database 1개와 그 database만 쓸 수 있는 계정 1개를 만든다.
+        서버 쪽 database·계정 이름은 db id 그대로 쓰고 사용자가 지은 `name`은 쓰지 않는다.
+        한도 안이면 승인 없이 바로 발급한다. 만드는 일이 끝나기 전에도 항상 `202`로 답한다 (`201`로 바꾸지 않는다).
+        접속 정보는 응답에 넣지 않고 완료 뒤 7.5로 받는다.
+
+        권한: 본인
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        $ref: '#/components/requestBodies/CreateDatabase'
+      responses:
+        '202':
+          $ref: '#/components/responses/DatabaseOperation'
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /api/v2/teams/{team_id}/databases:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+    post:
+      tags: [Database]
+      operationId: createTeamDatabase
+      summary: 팀 DB 발급 (7.3)
+      description: |
+        7.2와 같고 소유자만 팀이다. 승인 대기·거절된 팀은 만들 수 없다 (관리자도 같다).
+
+        권한: 팀장·DevOps
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        $ref: '#/components/requestBodies/CreateDatabase'
+      responses:
+        '202':
+          $ref: '#/components/responses/DatabaseOperation'
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '403':
+          $ref: './components/common.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /api/v2/databases/{database_grn}:
+    parameters:
+      - $ref: '#/components/parameters/DatabaseGrn'
+    get:
+      tags: [Database]
+      operationId: getDatabase
+      summary: DB 상세 (7.4)
+      description: |
+        DB 정보와 접속 주소(비밀번호 제외)를 준다. 비밀번호는 7.5로 따로 받는다.
+
+        권한: 개인 본인 / 팀 팀원 전원. 볼 수 없으면 404
+      responses:
+        '200':
+          description: DB 상세
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DatabaseDetail'
+              example:
+                grn: 'grn:team-4p8w2k9m1xza:db-k3m9x2p7q4ta'
+                id: db-k3m9x2p7q4ta
+                name: 주문 서비스 DB
+                owner: { type: team, id: team-4p8w2k9m1xza, name: GSMSV }
+                engine: mysql
+                isolation: shared
+                status: active
+                write_locked: false
+                connection:
+                  host: db.example.com
+                  port: 3306
+                  database: db-k3m9x2p7q4ta
+                  username: db-k3m9x2p7q4ta
+                  tls: true
+                storage: { used_gb: 0.12, owner_total_used_gb: 0.4, owner_limit_gb: 2 }
+                max_connections: 10
+                created_by: { name: 홍길동 }
+                created_at: '2026-11-01T09:00:00Z'
+                updated_at: '2026-11-01T09:00:00Z'
+                expires_at: '2027-02-28T00:00:00Z'
+                permissions:
+                  delete: true
+                  update: true
+                  extend: true
+                  view_credentials: true
+                  rotate_password: true
+                  read_backup: true
+                  restore_backup: true
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+    patch:
+      tags: [Database]
+      operationId: renameDatabase
+      summary: DB 이름 수정 (7.7)
+      description: |
+        사용자가 보는 이름(`name`)만 바꾼다. 서버 쪽 database·계정 이름(db id)은 그대로다.
+
+        권한: 개인 본인 / 팀 팀장·DevOps
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RenameDatabaseRequest'
+            example:
+              name: 새 이름
+      responses:
+        '200':
+          description: 바꿨다
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenameDatabaseResponse'
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '403':
+          $ref: './components/common.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+    delete:
+      tags: [Database]
+      operationId: deleteDatabase
+      summary: DB 삭제 (7.8)
+      description: |
+        공유형은 database와 계정을 지운다. 파괴적 동작이라 `X-Confirm-Name`이 DB 이름과 정확히 같아야 한다.
+        백업 파일은 7일 동안 남겨 관리자만 쓸 수 있게 한다 (11.12). 감사 로그를 남긴다.
+
+        권한: 개인 본인 / 팀 팀장·DevOps
+      parameters:
+        - $ref: '#/components/parameters/ConfirmName'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          $ref: '#/components/responses/DatabaseOperation'
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '403':
+          $ref: './components/common.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+  /api/v2/databases/{database_grn}/credentials:
+    parameters:
+      - $ref: '#/components/parameters/DatabaseGrn'
+    get:
+      tags: [Database Credentials]
+      operationId: getDatabaseCredentials
+      summary: 접속 정보·비밀번호 조회 (7.5)
+      description: |
+        언제든 다시 볼 수 있고 볼 때마다 감사 로그를 남긴다. 응답에 `Cache-Control: no-store`를 붙인다.
+
+        권한: 개인 본인 / 팀 팀원 전원
+      responses:
+        '200':
+          description: 접속 정보
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DatabaseCredentials'
+              example:
+                host: db.example.com
+                port: 3306
+                database: db-k3m9x2p7q4ta
+                username: db-k3m9x2p7q4ta
+                password: example-password-not-real
+                jdbc_url: 'jdbc:mysql://db.example.com:3306/db-k3m9x2p7q4ta?sslMode=REQUIRED'
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+  /api/v2/databases/{database_grn}/password-rotation:
+    parameters:
+      - $ref: '#/components/parameters/DatabaseGrn'
+    post:
+      tags: [Database Credentials]
+      operationId: rotateDatabasePassword
+      summary: 비밀번호 교체 (7.6)
+      description: |
+        새 무작위 비밀번호를 적용하고 그 계정의 기존 연결을 모두 끊는다. 이 DB를 쓰는 함수·앱의 접속 정보도 자동으로 갱신한다.
+        감사 로그를 남긴다.
+
+        권한: 개인 본인 / 팀 팀장·DevOps
+      responses:
+        '200':
+          description: 교체했다
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PasswordRotationResponse'
+              example:
+                password: example-new-password-not-real
+                rotated_at: '2026-11-10T09:00:00Z'
+                reconnected: { functions: 1, app_cells: 0 }
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '403':
+          $ref: './components/common.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+        '409':
+          description: 전용형에서는 지원하지 않는다 (`NOT_SUPPORTED_FOR_DEDICATED`)
+          content:
+            application/json:
+              schema:
+                $ref: './components/common.yaml#/components/schemas/ErrorResponse'
+  /api/v2/databases/{database_grn}/extend:
+    parameters:
+      - $ref: '#/components/parameters/DatabaseGrn'
+    post:
+      tags: [Database]
+      operationId: extendDatabase
+      summary: 사용 기간 연장 (7.9)
+      description: |
+        사용 기간을 연장한다. 정지 중에 연장하면 계정 잠금을 푼다. 아직 연장할 수 있는 시기가 아니면 409다.
+
+        권한: 개인 본인 / 팀 팀원 전원
+      responses:
+        '200':
+          description: 연장했다
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [expires_at]
+                properties:
+                  expires_at:
+                    type: string
+                    format: date-time
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+        '409':
+          description: 아직 연장할 수 없다 (`EXTENSION_NOT_YET_AVAILABLE`)
+          content:
+            application/json:
+              schema:
+                $ref: './components/common.yaml#/components/schemas/ErrorResponse'
+  /api/v2/databases/{database_grn}/backups:
+    parameters:
+      - $ref: '#/components/parameters/DatabaseGrn'
+    get:
+      tags: [Database Backup]
+      operationId: listDatabaseBackups
+      summary: 백업 목록 (7.10)
+      description: |
+        매일 자동 백업과 복원 직전 자동 백업을 준다. 7일 보관한다. 사용자가 직접 만드는 백업은 없다.
+
+        권한: 개인 본인 / 팀 팀원 전원
+      responses:
+        '200':
+          description: 백업 목록
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Backup'
+              example:
+                items:
+                  - id: backup-3x7q9m4k
+                    kind: daily
+                    created_at: '2026-11-10T03:00:00Z'
+                    size_mb: 12.4
+                    expires_at: '2026-11-17T03:00:00Z'
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+  /api/v2/databases/{database_grn}/backups/{backup_id}/download:
+    parameters:
+      - $ref: '#/components/parameters/DatabaseGrn'
+      - $ref: '#/components/parameters/BackupId'
+    get:
+      tags: [Database Backup]
+      operationId: downloadDatabaseBackup
+      summary: 백업 내려받기 (7.11)
+      description: |
+        SQL 덤프를 gzip으로 내려준다. 내려받을 때마다 감사 로그를 남긴다.
+        다른 DB의 백업 id면 404다 (부모 GRN과 실제 부모가 다르면 404).
+
+        권한: 개인 본인 / 팀 팀원 전원
+      responses:
+        '200':
+          description: SQL 덤프 파일
+          content:
+            application/gzip:
+              schema:
+                type: string
+                format: binary
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+  /api/v2/databases/{database_grn}/backups/{backup_id}/restore:
+    parameters:
+      - $ref: '#/components/parameters/DatabaseGrn'
+      - $ref: '#/components/parameters/BackupId'
+    post:
+      tags: [Database Backup]
+      operationId: restoreDatabaseBackup
+      summary: 백업에서 복원 (7.12)
+      description: |
+        같은 DB에 덮어쓴다. 덮어쓰기 전에 지금 상태를 복원 직전 백업(`pre_restore`)으로 먼저 남긴다.
+        파괴적 동작이라 `confirm_name`이 DB 이름과 정확히 같아야 한다. 감사 로그를 남긴다.
+
+        권한: 개인 본인 / 팀 팀장·DevOps
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RestoreBackupRequest'
+            example:
+              confirm_name: 주문 서비스 DB
+      responses:
+        '202':
+          description: 복원을 시작했다. operation `type`은 `backup.restore`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RestoreOperationResponse'
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '403':
+          $ref: './components/common.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+  /api/v2/admin/deleted-databases/{database_grn}/restore:
+    parameters:
+      - $ref: '#/components/parameters/DatabaseGrn'
+    post:
+      tags: [Admin Database]
+      operationId: restoreDeletedDatabase
+      summary: 삭제된 DB 백업 되살리기 (11.12)
+      description: |
+        삭제(사용자 삭제·만료·졸업·해체) 뒤 7일 안의 백업으로 DB를 되살린다.
+        경로의 `database_grn`은 삭제된 DB의 **원래 GRN**이다. 서버는 삭제된 행에서 GRN을 다시 만들어 통째로 비교한다.
+        감사 로그를 남긴다.
+
+        권한: 관리자
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RestoreDeletedDatabaseRequest'
+      responses:
+        '202':
+          $ref: '#/components/responses/DatabaseOperation'
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '403':
+          $ref: './components/common.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+components:
+  securitySchemes:
+    accessToken:
+      $ref: './components/common.yaml#/components/securitySchemes/accessToken'
+  parameters:
+    DatabaseGrn:
+      name: database_grn
+      in: path
+      required: true
+      description: |
+        DB GRN 전체. 한 경로 구간으로 보내고 콜론(:)은 퍼센트 인코딩한다.
+        GRN 문자열을 직접 자르지 않고 파서로 검사한다. 형식/종류 오류는 400, DB 소유자와 요청 GRN이 다르면 404다.
+      schema:
+        type: string
+        pattern: '^grn:(user|team)-[0-9a-hjkmnp-tv-z]{12}:db-[0-9a-hjkmnp-tv-z]{12}$'
+      example: 'grn:team-4p8w2k9m1xza:db-k3m9x2p7q4ta'
+    TeamId:
+      name: team_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^team-[0-9a-hjkmnp-tv-z]{12}$'
+      example: team-4p8w2k9m1xza
+    BackupId:
+      name: backup_id
+      in: path
+      required: true
+      description: 백업 id. 부모 DB의 GRN과 함께 보낸다. 다른 DB의 백업이면 404다
+      schema:
+        type: string
+        pattern: '^backup-[0-9a-hjkmnp-tv-z]{8}$'
+      example: backup-3x7q9m4k
+    ConfirmName:
+      name: X-Confirm-Name
+      in: header
+      required: true
+      description: DB의 현재 표시 이름을 퍼센트 인코딩한 값. 디코딩 뒤 정확히 비교한다. 없으면 400 `VALIDATION_FAILED`, 다르면 400 `CONFIRMATION_MISMATCH`
+      schema:
+        type: string
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: 같은 요청을 다시 보내도 한 번만 처리하게 하는 값. 보내기를 권장한다
+      schema:
+        type: string
+  requestBodies:
+    CreateDatabase:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/CreateDatabaseRequest'
+          example:
+            name: 주문 서비스 DB
+            engine: mysql
+  responses:
+    DatabaseOperation:
+      description: 요청을 받았고 작업이 진행 중이다. operation `type`은 `db.create` 또는 `db.delete`다
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/DatabaseOperationResponse'
+          example:
+            operation: { id: op-4p8w2k9m1xza, type: db.create, status: running }
+            resource: { grn: 'grn:team-4p8w2k9m1xza:db-k3m9x2p7q4ta', status: creating }
+    Unprocessable:
+      description: 개수 한도 초과(`QUOTA_EXCEEDED`, `details`에 한도와 쓰는 개수) 또는 쓰기 금지 소유자(`WRITE_LOCKED_OWNER`)
+      content:
+        application/json:
+          schema:
+            $ref: './components/common.yaml#/components/schemas/ErrorResponse'
+  schemas:
+    DatabaseName:
+      type: string
+      minLength: 1
+      maxLength: 30
+      description: 앞뒤 공백을 지운 뒤 1~30자. 이름 규칙의 세부는 후속 계약에서 확정한다
+    DatabaseEngine:
+      type: string
+      enum: [mysql, postgresql]
+      description: 1차는 mysql. postgresql은 두 번째 단계다
+    DatabaseStatus:
+      type: string
+      enum: [creating, active, suspended, deleting, failed]
+      description: 상태 이름은 서버 구현과 함께 확정한다
+    CreateDatabaseRequest:
+      type: object
+      additionalProperties: false
+      required: [name, engine]
+      properties:
+        name:
+          $ref: '#/components/schemas/DatabaseName'
+        engine:
+          $ref: '#/components/schemas/DatabaseEngine'
+    RenameDatabaseRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          $ref: '#/components/schemas/DatabaseName'
+    RenameDatabaseResponse:
+      type: object
+      required: [grn, name]
+      properties:
+        grn:
+          type: string
+        name:
+          type: string
+    Owner:
+      type: object
+      required: [type, id, name]
+      properties:
+        type:
+          type: string
+          enum: [user, team]
+        id:
+          type: string
+          description: 볼 수 있을 때만 준다
+        name:
+          type: string
+    Storage:
+      type: object
+      required: [used_gb]
+      properties:
+        used_gb:
+          type: number
+    DatabaseSummary:
+      type: object
+      required: [grn, name, engine, isolation, status, write_locked, storage, expires_at]
+      properties:
+        grn:
+          type: string
+        name:
+          type: string
+        engine:
+          $ref: '#/components/schemas/DatabaseEngine'
+        isolation:
+          type: string
+          enum: [shared, dedicated]
+        status:
+          $ref: '#/components/schemas/DatabaseStatus'
+        write_locked:
+          type: boolean
+          description: 소유자의 용량이 한도를 넘어 쓰기 금지인지
+        storage:
+          $ref: '#/components/schemas/Storage'
+        expires_at:
+          type: string
+          format: date-time
+    DatabaseSummaryPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/DatabaseSummary'
+        next_cursor:
+          type: [string, 'null']
+    DatabaseDetail:
+      type: object
+      required: [grn, id, name, owner, engine, isolation, status, write_locked, connection, storage, max_connections, created_by, created_at, updated_at, expires_at, permissions]
+      properties:
+        grn:
+          type: string
+        id:
+          type: string
+        name:
+          type: string
+        owner:
+          $ref: '#/components/schemas/Owner'
+        engine:
+          $ref: '#/components/schemas/DatabaseEngine'
+        isolation:
+          type: string
+          enum: [shared, dedicated]
+        status:
+          $ref: '#/components/schemas/DatabaseStatus'
+        write_locked:
+          type: boolean
+        connection:
+          type: object
+          description: 비밀번호는 넣지 않는다 (7.5로 받는다). `host`는 노드를 드러내지 않는 값이다
+          required: [host, port, database, username, tls]
+          properties:
+            host: { type: string }
+            port: { type: integer }
+            database: { type: string }
+            username: { type: string }
+            tls: { type: boolean }
+        storage:
+          type: object
+          required: [used_gb, owner_total_used_gb, owner_limit_gb]
+          properties:
+            used_gb: { type: number }
+            owner_total_used_gb: { type: number }
+            owner_limit_gb: { type: number }
+        max_connections:
+          type: integer
+        created_by:
+          type: object
+          description: 이름만 준다
+          required: [name]
+          properties:
+            name: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        permissions:
+          type: object
+          description: 그 사용자가 할 수 있는 동작. 프론트는 버튼을 숨기는 데만 쓴다
+          additionalProperties:
+            type: boolean
+    DatabaseCredentials:
+      type: object
+      required: [host, port, database, username, password, jdbc_url]
+      properties:
+        host: { type: string }
+        port: { type: integer }
+        database: { type: string }
+        username: { type: string }
+        password: { type: string }
+        jdbc_url: { type: string }
+    PasswordRotationResponse:
+      type: object
+      required: [password, rotated_at, reconnected]
+      properties:
+        password: { type: string }
+        rotated_at: { type: string, format: date-time }
+        reconnected:
+          type: object
+          required: [functions, app_cells]
+          properties:
+            functions: { type: integer }
+            app_cells: { type: integer }
+    Backup:
+      type: object
+      required: [id, kind, created_at, size_mb, expires_at]
+      properties:
+        id:
+          type: string
+          pattern: '^backup-[0-9a-hjkmnp-tv-z]{8}$'
+        kind:
+          type: string
+          enum: [daily, pre_restore]
+        created_at: { type: string, format: date-time }
+        size_mb: { type: number }
+        expires_at: { type: string, format: date-time }
+    RestoreBackupRequest:
+      type: object
+      additionalProperties: false
+      required: [confirm_name]
+      properties:
+        confirm_name:
+          type: string
+          description: DB의 현재 표시 이름과 정확히 같아야 한다. 다르면 400 `CONFIRMATION_MISMATCH`
+    RestoreDeletedDatabaseRequest:
+      type: object
+      additionalProperties: false
+      required: [backup_file]
+      properties:
+        backup_file:
+          type: string
+          description: 남은 백업 파일 식별자. 형식은 후속 계약에서 확정한다
+        owner:
+          type: string
+          description: 원래 소유자가 없을 때(탈퇴·해체)만 다른 `user-…`·`team-…`. 이 경우 감사 로그에 원래 소유자와 함께 남긴다
+    OperationRef:
+      type: object
+      description: 공통 operation의 최소 표시 필드. 나머지 값은 operation 후속 명세에서 정한다
+      required: [id, type, status]
+      properties:
+        id: { type: string }
+        type: { type: string }
+        status: { type: string }
+    DatabaseOperationResponse:
+      type: object
+      required: [operation, resource]
+      properties:
+        operation:
+          $ref: '#/components/schemas/OperationRef'
+        resource:
+          type: object
+          required: [grn, status]
+          properties:
+            grn: { type: string }
+            status:
+              $ref: '#/components/schemas/DatabaseStatus'
+    RestoreOperationResponse:
+      type: object
+      required: [operation, resource, pre_restore_backup]
+      properties:
+        operation:
+          $ref: '#/components/schemas/OperationRef'
+        resource:
+          type: object
+          required: [grn]
+          properties:
+            grn: { type: string }
+        pre_restore_backup:
+          type: object
+          required: [id]
+          properties:
+            id:
+              type: string
+              pattern: '^backup-[0-9a-hjkmnp-tv-z]{8}$'
