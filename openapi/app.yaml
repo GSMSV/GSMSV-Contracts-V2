@@ -1,0 +1,449 @@
+openapi: 3.1.0
+info:
+  title: GSMSV v2 App API
+  version: 0.1.0
+  description: |
+    원터치 배포 앱의 생성·목록·상세·설정 수정·삭제·연장과 서브도메인 확인.
+    서비스·환경·칸의 관리 API와 PR 미리보기 API는 이 명세 범위 밖이다.
+    JSON 칸 이름과 enum 값은 소문자 snake_case다. 공통 오류는 { code, message, request_id, details? }다.
+    permissions 키는 현재 서버의 동작 이름 소문자(view, extend, delete 등)를 쓴다.
+    그 밖의 앱 수명 상태 이름과 operation 상세 필드는 후속 계약에서 확정한다.
+servers:
+  - url: https://{host}
+    variables:
+      host:
+        default: example.com
+security:
+  - accessToken: []
+tags:
+  - name: App
+    description: 앱 생성·조회·변경·삭제·연장
+  - name: App Subdomain
+    description: 앱 배포 주소의 사용 가능 여부
+paths:
+  /api/v2/apps:
+    post:
+      tags: [App]
+      operationId: createPersonalApp
+      summary: 개인 앱 만들기 (8.2)
+      description: |
+        로그인한 사람 소유로 앱과 기본 production 환경 하나를 만든다.
+        소유 종류와 소유자 id는 생성 뒤 바꿀 수 없다. 개인 앱은 2개까지다.
+        일반 사용자 개인 앱은 생성 후 14일, 관리자 개인 앱은 팀 자원과 같은 31일 뒤 만료된다.
+      requestBody:
+        $ref: '#/components/requestBodies/CreateApp'
+      responses:
+        '201':
+          $ref: '#/components/responses/AppCreated'
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '409':
+          $ref: '#/components/responses/AppConflict'
+    get:
+      tags: [App]
+      operationId: listPersonalApps
+      summary: 내 개인 앱 목록
+      description: 로그인한 사람의 개인 앱만 돌려준다. 최신 생성 순이다
+      parameters:
+        - $ref: './components/common.yaml#/components/parameters/Cursor'
+        - $ref: './components/common.yaml#/components/parameters/Limit'
+      responses:
+        '200':
+          $ref: '#/components/responses/AppList'
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+  /api/v2/teams/{team_id}/apps:
+    parameters:
+      - $ref: './team.yaml#/components/parameters/TeamId'
+    post:
+      tags: [App]
+      operationId: createTeamApp
+      summary: 팀 앱 만들기 (8.3)
+      description: |
+        개인 앱 만들기와 같은 { name } 본문·응답을 쓴다. 기본 production 환경 하나를 만든다.
+        팀장·DevOps와 관리자가 만들 수 있으나 승인 대기·거절 팀은 관리자에게도 403 TEAM_NOT_APPROVED다.
+        팀 앱은 4개까지이고 만든 사람의 개인 앱 개수에서는 빼지 않는다.
+        첫 만료는 생성 후 31일이다.
+      requestBody:
+        $ref: '#/components/requestBodies/CreateApp'
+      responses:
+        '201':
+          $ref: '#/components/responses/AppCreated'
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '403':
+          $ref: './components/common.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/AppConflict'
+    get:
+      tags: [App]
+      operationId: listTeamApps
+      summary: 팀 앱 목록
+      description: 팀원 전원과 관리자가 볼 수 있다. 볼 수 없는 팀은 404다
+      parameters:
+        - $ref: './components/common.yaml#/components/parameters/Cursor'
+        - $ref: './components/common.yaml#/components/parameters/Limit'
+      responses:
+        '200':
+          $ref: '#/components/responses/AppList'
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+  /api/v2/apps/{app_grn}:
+    parameters:
+      - $ref: '#/components/parameters/AppGrn'
+    get:
+      tags: [App]
+      operationId: getApp
+      summary: 앱 상세
+      description: |
+        개인 앱은 본인, 팀 앱은 팀원 전원과 관리자가 볼 수 있다.
+        환경·서비스·배포 기록 등 하위 자원 목록은 앱 GRN과 함께 돌려준다.
+        보이지 않는 앱 또는 요청 GRN의 소유자와 DB 소유자가 다르면 404다.
+      responses:
+        '200':
+          $ref: '#/components/responses/AppDetail'
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+    patch:
+      tags: [App]
+      operationId: updateApp
+      summary: 앱 설정 수정
+      description: |
+        이 범위에서는 앱 표시 이름만 수정한다. 소유자는 바꿀 수 없다.
+        개인 앱은 본인, 팀 앱은 팀장·DevOps가 수정한다. 관리자는 공통 관리자 규칙을 따른다.
+        PR 미리보기 설정은 2차 API에서 명세한다.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateAppRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/AppDetail'
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '403':
+          $ref: './components/common.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+    delete:
+      tags: [App]
+      operationId: deleteApp
+      summary: 앱 삭제 (8.6)
+      description: |
+        개인 앱은 본인, 팀 앱은 팀장·DevOps가 삭제한다. 관리자는 공통 관리자 규칙을 따른다.
+        이름 확인 뒤 바로 app.delete 비동기 작업을 시작하고 앱 상태를 deleting으로 바꾼다.
+        3일 유예는 만료 삭제에만 적용한다. 만료 유예가 끝나도 같은 작업을 사용한다.
+        연결 DB는 삭제하지 않고 연결만 끊는다. 실행 로그는 3일 뒤 제거하고 그 전에는 관리자만 볼 수 있다.
+        Infra 연동 호출 방식은 후속 계약이다.
+      parameters:
+        - $ref: '#/components/parameters/ConfirmName'
+      responses:
+        '202':
+          description: 삭제 작업을 시작했다. resource.status는 deleting이다
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppOperationResponse'
+        '400':
+          description: 요청 또는 확인 이름 오류 (CONFIRMATION_MISMATCH 포함)
+          content:
+            application/json:
+              schema:
+                $ref: './components/common.yaml#/components/schemas/ErrorResponse'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '403':
+          $ref: './components/common.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+  /api/v2/apps/{app_grn}/extend:
+    parameters:
+      - $ref: '#/components/parameters/AppGrn'
+    post:
+      tags: [App]
+      operationId: extendApp
+      summary: 앱 사용 기간 연장
+      description: |
+        개인 앱은 본인, 팀 앱은 팀원 전원이 연장할 수 있다.
+        개인·팀 앱 모두 만료 7일 전부터 신청할 수 있고 유예 중에도 가능하다.
+        기존 만료일과 현재 시각 중 늦은 시각에서 14일을 더한다.
+        연결 DB의 만료일이 더 이르면 앱 만료일에 맞춘다.
+      responses:
+        '200':
+          $ref: '#/components/responses/AppDetail'
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+        '409':
+          description: 아직 연장 가능 시점이 아니다 (EXTENSION_NOT_YET_AVAILABLE)
+          content:
+            application/json:
+              schema:
+                $ref: './components/common.yaml#/components/schemas/ErrorResponse'
+  /api/v2/apps/subdomains/availability:
+    get:
+      tags: [App Subdomain]
+      operationId: checkAppSubdomain
+      summary: production 서브도메인 사용 가능 여부 (8.38)
+      description: |
+        인증된 사용자가 서비스 생성 전에도 호출할 수 있다. 확인은 이름을 예약하지 않는다.
+        형식 오류도 200 available=false, reason=invalid_format으로 응답한다.
+        누가 이름을 점유하는지는 노출하지 않는다. 사용자당 분당 60회(서버 설정)를 넘으면 429다.
+        이미 자기 칸이 쓰는 이름과 같은지 확인하는 요청은 프론트가 생략한다.
+      parameters:
+        - name: name
+          in: query
+          required: true
+          description: |
+            확인할 production 서브도메인 한 개. 유효한 이름은 3~63자이며 영어 소문자로 시작하고
+            영어 소문자·숫자·하이픈만 포함하며 하이픈으로 끝나지 않는다. 점과 연속 하이픈은 금지다.
+            형식 제한을 스키마 검증에 적용하지 않아 invalid_format도 200으로 돌려준다.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 현재 사용 가능 여부. 저장 시 다시 검사한다
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubdomainAvailability'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '429':
+          description: 사용자별 요청 제한 초과
+          content:
+            application/json:
+              schema:
+                $ref: './components/common.yaml#/components/schemas/ErrorResponse'
+components:
+  securitySchemes:
+    accessToken:
+      $ref: './components/common.yaml#/components/securitySchemes/accessToken'
+  parameters:
+    AppGrn:
+      name: app_grn
+      in: path
+      required: true
+      description: |
+        앱 GRN 전체. 한 경로 구간으로 보내고 콜론(:)은 퍼센트 인코딩한다.
+        GRN 문자열을 직접 자르지 않고 파서로 검사한다. 형식/종류 오류는 400,
+        DB 소유자와 요청 GRN이 다르면 404다.
+      schema:
+        type: string
+        pattern: '^grn:(user|team)-[0-9a-hjkmnp-tv-z]{12}:app-[0-9a-hjkmnp-tv-z]{12}$'
+      example: 'grn:user-4p8w2k9m1xza:app-5r8t2y6w3kqm'
+    ConfirmName:
+      name: X-Confirm-Name
+      in: header
+      required: true
+      description: 앱의 현재 표시 이름을 퍼센트 인코딩한 값. 디코딩 뒤 정확히 비교한다
+      schema:
+        type: string
+  requestBodies:
+    CreateApp:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/CreateAppRequest'
+          example:
+            name: 내 앱
+  responses:
+    AppCreated:
+      description: 앱과 기본 production 환경을 만들었다
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AppDetail'
+    AppList:
+      description: 볼 수 있는 앱 목록
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AppPage'
+    AppDetail:
+      description: 앱 상세
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AppDetail'
+    AppConflict:
+      description: 소유자별 앱 개수 한도 초과 등 생성 충돌
+      content:
+        application/json:
+          schema:
+            $ref: './components/common.yaml#/components/schemas/ErrorResponse'
+  schemas:
+    AppName:
+      type: string
+      minLength: 1
+      maxLength: 30
+      description: 앞뒤 공백을 지운 뒤 1~30자. 글자 제한과 앱 이름 중복 제한은 없다
+    CreateAppRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          $ref: '#/components/schemas/AppName'
+    UpdateAppRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          $ref: '#/components/schemas/AppName'
+    Owner:
+      type: object
+      required: [type, id, name]
+      properties:
+        type:
+          type: string
+          enum: [user, team]
+        id:
+          type: string
+        name:
+          type: string
+    AppPermissions:
+      type: object
+      description: 요청자가 할 수 있는 동작. 프론트의 표시용이며 서버 권한 검사와 별개다
+      required: [view, update, extend, delete]
+      properties:
+        view:
+          type: boolean
+        update:
+          type: boolean
+        extend:
+          type: boolean
+        delete:
+          type: boolean
+      additionalProperties:
+        type: boolean
+    AppEnvironment:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: string
+          pattern: '^env-[0-9a-hjkmnp-tv-z]{8}$'
+        name:
+          type: string
+          description: 생성 응답에는 production 환경이 하나 들어 있다
+    AppSummary:
+      type: object
+      required: [grn, id, name, owner, status, created_by, created_at, updated_at, expires_at, permissions]
+      properties:
+        grn:
+          type: string
+        id:
+          type: string
+          pattern: '^app-[0-9a-hjkmnp-tv-z]{12}$'
+        name:
+          type: string
+        owner:
+          $ref: '#/components/schemas/Owner'
+        status:
+          type: string
+          description: 앱 수명 상태. 삭제 작업 중에는 deleting이며 나머지 값은 후속 계약에서 확정한다
+        created_by:
+          type: string
+          description: 만든 사람의 표시 이름
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        permissions:
+          $ref: '#/components/schemas/AppPermissions'
+    AppDetail:
+      allOf:
+        - $ref: '#/components/schemas/AppSummary'
+        - type: object
+          required: [envs, services, domains, deployments]
+          properties:
+            envs:
+              type: array
+              description: 생성 응답에는 production 환경이 정확히 하나 있다
+              items:
+                $ref: '#/components/schemas/AppEnvironment'
+            services:
+              type: array
+              description: 하위 서비스 id 목록. 서비스 API 상세 형식은 후속 계약
+              items:
+                type: string
+            domains:
+              type: array
+              description: 하위 도메인 연결 id 목록. 도메인 API 상세 형식은 후속 계약
+              items:
+                type: string
+            deployments:
+              type: array
+              description: 하위 배포 기록 id 목록. 배포 API 상세 형식은 후속 계약
+              items:
+                type: string
+    AppPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AppSummary'
+        next_cursor:
+          type: [string, 'null']
+    AppOperationResponse:
+      type: object
+      required: [operation, resource]
+      properties:
+        operation:
+          type: object
+          description: 공통 operation의 최소 표시 필드. 조회·SSE와 나머지 값은 Server-V2 #26의 후속 명세에서 정한다
+          required: [id, status, stage]
+          properties:
+            id:
+              type: string
+            status:
+              type: string
+              description: 소문자 값. 상태 목록은 후속 명세
+            stage:
+              type: [string, 'null']
+              description: 진행 단계. 값 목록은 후속 명세
+        resource:
+          $ref: '#/components/schemas/AppDetail'
+    SubdomainAvailability:
+      type: object
+      required: [available, reason]
+      properties:
+        available:
+          type: boolean
+        reason:
+          description: available=true이면 null. 점유자 정보는 포함하지 않는다
+          type: [string, 'null']
+          enum: [taken, reserved, invalid_format, null]
