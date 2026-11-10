@@ -1,0 +1,642 @@
+openapi: 3.1.0
+info:
+  title: GSMSV v2 Network API
+  version: 0.1.0
+  description: |
+    VM의 포트포워딩(5.6~5.9), HTTPS 도메인(5.10~5.13), 방화벽 규칙(5.14~5.16).
+
+    - 규칙의 원본은 [22번 권한 판단](../rules/authorization.md), [23번 자원 이름 규칙](../rules/resource-naming.md)이다
+    - 하위 자원(`port`·`domain`·`fwrule`)은 부모 VM의 GRN과 함께 가리킨다. 부모 GRN 없이 하위 id만으로 찾는 API는 없다. 실제 부모가 다른 하위 id는 404다
+    - JSON 칸 이름은 snake_case, enum 값은 소문자다
+    - 오류 본문은 공통 형식 `{ code, message, request_id, details? }`다. 아래에 적지 않은 공통 오류(400·401·404)도 모든 API에 해당한다
+    - 조회는 본인·팀원 전원·관리자, 추가·수정·삭제는 개인 본인 / 팀 팀장·DevOps다
+
+    네트워크 API가 쓰는 오류 `code`
+
+    | 상태 | code | 뜻 |
+    |---|---|---|
+    | 403 | `ACCESS_DENIED` | 볼 수는 있지만 그 동작 권한이 없다 |
+    | 409 | `CONFLICT` | 외부 포트를 선점하다 충돌했다. 다시 시도한다 |
+    | 409 | `ALREADY_EXISTS` | 이미 쓰는 서브도메인이다 (전체 서비스 기준) |
+    | 409 | `VM_NO_INTERNAL_IP` | VM에 내부 IP가 아직 없다 |
+    | 422 | `QUOTA_EXCEEDED` | 개수 한도 초과 (커스텀 포트 30개, 도메인 VM당 2개 등) |
+    | 502 | `GATEWAY_SYNC_FAILED` | 게이트웨이 반영에 실패했다. 저장한 기록은 지운다 |
+    | 503 | `NO_FREE_PORT` | 100번 시도해도 빈 외부 포트를 못 찾았다 |
+    | 503 | `UPSTREAM_UNAVAILABLE` | 가상화 서버가 응답하지 않는다 |
+servers:
+  - url: https://{host}
+    variables:
+      host:
+        default: example.com
+security:
+  - accessToken: []
+tags:
+  - name: Port Forward
+    description: 포트포워딩
+  - name: HTTPS Domain
+    description: HTTPS 도메인 연결
+  - name: Firewall Rule
+    description: 방화벽 규칙
+paths:
+  /api/v2/vms/{vm_grn}/port-forwards:
+    parameters:
+      - $ref: '#/components/parameters/VmGrn'
+    get:
+      tags: [Port Forward]
+      operationId: listPortForwards
+      summary: 포트포워딩 목록 (5.6)
+      description: |
+        기본 포트 3종(SSH·HTTP·SVC)과 커스텀 포트를 함께 준다.
+
+        권한: 본인·팀원 전원·관리자
+      responses:
+        '200':
+          description: 포트포워딩 목록
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PortForwardList'
+              example:
+                items:
+                  - id: port-5q8w3n7z
+                    kind: ssh
+                    external_port: 20022
+                    internal_port: 22
+                    protocol: tcp
+                    allowed_source: null
+                    description: null
+                public_host: vm.example.com
+                limits: { custom: 30 }
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+    post:
+      tags: [Port Forward]
+      operationId: createPortForward
+      summary: 커스텀 포트포워딩 추가 (5.7)
+      description: |
+        외부 포트는 사용자가 고르지 않는다. 서버가 커스텀 범위에서 빈 번호를 무작위로 골라 먼저 저장해 선점한 뒤 게이트웨이에 반영한다.
+        반영에 실패하면 저장한 기록을 지우고 502로 끝낸다.
+
+        권한: 개인 본인 / 팀 팀장·DevOps
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePortForwardRequest'
+            example:
+              internal_port: 8080
+              protocol: tcp
+              allowed_source: 203.0.113.0/24
+              description: 개발용
+      responses:
+        '201':
+          description: 추가했다
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreatePortForwardResponse'
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '403':
+          $ref: './components/common.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '422':
+          $ref: '#/components/responses/QuotaExceeded'
+        '502':
+          $ref: '#/components/responses/GatewaySyncFailed'
+        '503':
+          $ref: '#/components/responses/NoFreePort'
+  /api/v2/vms/{vm_grn}/port-forwards/{port_id}:
+    parameters:
+      - $ref: '#/components/parameters/VmGrn'
+      - $ref: '#/components/parameters/PortId'
+    delete:
+      tags: [Port Forward]
+      operationId: deletePortForward
+      summary: 포트포워딩 삭제 (5.8)
+      description: |
+        없는 포트이거나 다른 VM의 포트면 404다.
+
+        권한: 개인 본인 / 팀 팀장·DevOps
+      responses:
+        '204':
+          description: 지웠다
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '403':
+          $ref: './components/common.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+        '502':
+          $ref: '#/components/responses/GatewaySyncFailed'
+  /api/v2/vms/{vm_grn}/port-forwards/restore-defaults:
+    parameters:
+      - $ref: '#/components/parameters/VmGrn'
+    post:
+      tags: [Port Forward]
+      operationId: restoreDefaultPortForwards
+      summary: 기본 포트 복원 (5.9)
+      description: |
+        기본 3종 중 빠진 것만 다시 만든다. 빠진 게 없으면 0건으로 끝난다 (멱등).
+        계산된 외부 포트가 다른 포트와 충돌하면 409 `CONFLICT`다.
+
+        권한: 개인 본인 / 팀 팀장·DevOps
+      responses:
+        '200':
+          description: 복원 결과
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RestoreDefaultsResponse'
+              example:
+                restored: 1
+                items:
+                  - { id: port-5q8w3n7z, kind: ssh, external_port: 20022 }
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '403':
+          $ref: './components/common.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '502':
+          $ref: '#/components/responses/GatewaySyncFailed'
+  /api/v2/vms/{vm_grn}/domains:
+    parameters:
+      - $ref: '#/components/parameters/VmGrn'
+    get:
+      tags: [HTTPS Domain]
+      operationId: listDomains
+      summary: HTTPS 도메인 목록 (5.10)
+      description: |
+        권한: 본인·팀원 전원·관리자
+      responses:
+        '200':
+          description: 도메인 목록
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DomainList'
+              example:
+                items:
+                  - id: domain-4k8m2q9t
+                    subdomain: my-app
+                    url: https://my-app.example.com
+                    internal_port: 8080
+                    sync_status: synced
+                limits: { per_vm: 2 }
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+    post:
+      tags: [HTTPS Domain]
+      operationId: createDomain
+      summary: HTTPS 도메인 연결 (5.11)
+      description: |
+        서브도메인은 전체 서비스에서 유일해야 한다. 영문 소문자·숫자·`-`, 1~63자이고 예약어는 쓸 수 없다.
+        VM당 2개까지다.
+
+        권한: 개인 본인 / 팀 팀장·DevOps
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDomainRequest'
+            example:
+              subdomain: my-app
+              internal_port: 8080
+      responses:
+        '201':
+          description: 연결했다
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, url, sync_status]
+                properties:
+                  id: { type: string, pattern: '^domain-[0-9a-hjkmnp-tv-z]{8}$' }
+                  url: { type: string }
+                  sync_status: { $ref: '#/components/schemas/SyncStatus' }
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '403':
+          $ref: './components/common.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '422':
+          $ref: '#/components/responses/QuotaExceeded'
+        '502':
+          $ref: '#/components/responses/GatewaySyncFailed'
+  /api/v2/vms/{vm_grn}/domains/{domain_id}:
+    parameters:
+      - $ref: '#/components/parameters/VmGrn'
+      - $ref: '#/components/parameters/DomainId'
+    patch:
+      tags: [HTTPS Domain]
+      operationId: updateDomain
+      summary: HTTPS 도메인 수정 (5.12)
+      description: |
+        서브도메인이나 내부 포트를 바꾼다. 새 서브도메인이 이미 쓰이면 409 `ALREADY_EXISTS`다.
+
+        권한: 개인 본인 / 팀 팀장·DevOps
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateDomainRequest'
+      responses:
+        '200':
+          description: 바꿨다
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, url, internal_port, sync_status]
+                properties:
+                  id: { type: string }
+                  url: { type: string }
+                  internal_port: { type: integer }
+                  sync_status: { $ref: '#/components/schemas/SyncStatus' }
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '403':
+          $ref: './components/common.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '502':
+          $ref: '#/components/responses/GatewaySyncFailed'
+    delete:
+      tags: [HTTPS Domain]
+      operationId: deleteDomain
+      summary: HTTPS 도메인 삭제 (5.13)
+      description: |
+        없거나 다른 VM의 라우트면 404다.
+
+        권한: 개인 본인 / 팀 팀장·DevOps
+      responses:
+        '204':
+          description: 지웠다
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '403':
+          $ref: './components/common.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+        '502':
+          $ref: '#/components/responses/GatewaySyncFailed'
+  /api/v2/vms/{vm_grn}/firewall-rules:
+    parameters:
+      - $ref: '#/components/parameters/VmGrn'
+    get:
+      tags: [Firewall Rule]
+      operationId: listFirewallRules
+      summary: 방화벽 규칙 목록 (5.14)
+      description: |
+        권한: 본인·팀원 전원·관리자
+      parameters:
+        - $ref: './components/common.yaml#/components/parameters/Cursor'
+        - $ref: './components/common.yaml#/components/parameters/Limit'
+      responses:
+        '200':
+          description: 방화벽 규칙 목록
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FirewallRulePage'
+              example:
+                enabled: true
+                items:
+                  - { id: fwrule-7m3k9p2x, action: accept, direction: in, protocol: tcp, dport: '80', source: 203.0.113.0/24 }
+                limits: { per_vm: 20 }
+                next_cursor: null
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/UpstreamUnavailable'
+    post:
+      tags: [Firewall Rule]
+      operationId: createFirewallRule
+      summary: 방화벽 규칙 추가 (5.15)
+      description: |
+        목적지는 입력과 상관없이 그 VM의 내부 IP로 강제한다. 규칙을 추가하면 VM 방화벽을 켠다.
+
+        권한: 개인 본인 / 팀 팀장·DevOps
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateFirewallRuleRequest'
+            example:
+              action: accept
+              direction: in
+              protocol: tcp
+              dport: '8000:8100'
+              source: 203.0.113.0/24
+      responses:
+        '201':
+          description: 추가했다
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id]
+                properties:
+                  id: { type: string, pattern: '^fwrule-[0-9a-hjkmnp-tv-z]{8}$' }
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '403':
+          $ref: './components/common.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/UpstreamUnavailable'
+  /api/v2/vms/{vm_grn}/firewall-rules/{fwrule_id}:
+    parameters:
+      - $ref: '#/components/parameters/VmGrn'
+      - $ref: '#/components/parameters/FirewallRuleId'
+    delete:
+      tags: [Firewall Rule]
+      operationId: deleteFirewallRule
+      summary: 방화벽 규칙 삭제 (5.16)
+      description: |
+        규칙을 지워도 VM 방화벽은 켜진 채로 둔다.
+
+        권한: 개인 본인 / 팀 팀장·DevOps
+      responses:
+        '204':
+          description: 지웠다
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '403':
+          $ref: './components/common.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/UpstreamUnavailable'
+components:
+  securitySchemes:
+    accessToken:
+      $ref: './components/common.yaml#/components/securitySchemes/accessToken'
+  parameters:
+    VmGrn:
+      name: vm_grn
+      in: path
+      required: true
+      description: |
+        VM GRN 전체. 한 경로 구간으로 보내고 콜론(:)은 퍼센트 인코딩한다.
+        GRN 문자열을 직접 자르지 않고 파서로 검사한다. 형식/종류 오류는 400, DB 소유자와 요청 GRN이 다르면 404다.
+      schema:
+        type: string
+        pattern: '^grn:(user|team)-[0-9a-hjkmnp-tv-z]{12}:vm-[0-9a-hjkmnp-tv-z]{12}$'
+      example: 'grn:user-4p8w2k9m1xza:vm-k3m9x2p7q4ta'
+    PortId:
+      name: port_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^port-[0-9a-hjkmnp-tv-z]{8}$'
+      example: port-5q8w3n7z
+    DomainId:
+      name: domain_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^domain-[0-9a-hjkmnp-tv-z]{8}$'
+      example: domain-4k8m2q9t
+    FirewallRuleId:
+      name: fwrule_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^fwrule-[0-9a-hjkmnp-tv-z]{8}$'
+      example: fwrule-7m3k9p2x
+  responses:
+    ConflictError:
+      description: 충돌 (`CONFLICT`, `ALREADY_EXISTS`, `VM_NO_INTERNAL_IP`)
+      content:
+        application/json:
+          schema:
+            $ref: './components/common.yaml#/components/schemas/ErrorResponse'
+    QuotaExceeded:
+      description: 개수 한도 초과 (`QUOTA_EXCEEDED`). `details`에 한도와 쓰는 개수
+      content:
+        application/json:
+          schema:
+            $ref: './components/common.yaml#/components/schemas/ErrorResponse'
+    GatewaySyncFailed:
+      description: 게이트웨이 반영 실패 (`GATEWAY_SYNC_FAILED`). 서버가 저장한 기록을 되돌린다
+      content:
+        application/json:
+          schema:
+            $ref: './components/common.yaml#/components/schemas/ErrorResponse'
+    NoFreePort:
+      description: 빈 외부 포트가 없다 (`NO_FREE_PORT`)
+      content:
+        application/json:
+          schema:
+            $ref: './components/common.yaml#/components/schemas/ErrorResponse'
+    UpstreamUnavailable:
+      description: 가상화 서버가 응답하지 않는다 (`UPSTREAM_UNAVAILABLE`)
+      content:
+        application/json:
+          schema:
+            $ref: './components/common.yaml#/components/schemas/ErrorResponse'
+  schemas:
+    SyncStatus:
+      type: string
+      enum: [pending, synced, failed]
+      description: 게이트웨이 반영 상태. 이름은 서버 구현과 함께 확정한다
+    Protocol:
+      type: string
+      enum: [tcp, udp]
+    PortForward:
+      type: object
+      required: [id, kind, external_port, internal_port, protocol, allowed_source, description]
+      properties:
+        id: { type: string, pattern: '^port-[0-9a-hjkmnp-tv-z]{8}$' }
+        kind:
+          type: string
+          enum: [ssh, http, svc, custom]
+        external_port: { type: integer }
+        internal_port: { type: integer }
+        protocol: { $ref: '#/components/schemas/Protocol' }
+        allowed_source:
+          type: [string, 'null']
+          description: IP 또는 CIDR. 없으면 모두 허용
+        description:
+          type: [string, 'null']
+    PortForwardList:
+      type: object
+      required: [items, public_host, limits]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/PortForward'
+        public_host: { type: string }
+        limits:
+          type: object
+          required: [custom]
+          properties:
+            custom: { type: integer }
+    CreatePortForwardRequest:
+      type: object
+      additionalProperties: false
+      required: [internal_port, protocol]
+      properties:
+        internal_port: { type: integer, minimum: 1, maximum: 65535 }
+        protocol: { $ref: '#/components/schemas/Protocol' }
+        allowed_source:
+          type: string
+          description: IP 또는 CIDR
+        description:
+          type: string
+    CreatePortForwardResponse:
+      type: object
+      required: [id, external_port, internal_port, protocol, sync_status]
+      properties:
+        id: { type: string }
+        external_port: { type: integer }
+        internal_port: { type: integer }
+        protocol: { $ref: '#/components/schemas/Protocol' }
+        sync_status: { $ref: '#/components/schemas/SyncStatus' }
+    RestoreDefaultsResponse:
+      type: object
+      required: [restored, items]
+      properties:
+        restored: { type: integer }
+        items:
+          type: array
+          items:
+            type: object
+            required: [id, kind, external_port]
+            properties:
+              id: { type: string }
+              kind: { type: string, enum: [ssh, http, svc] }
+              external_port: { type: integer }
+    Domain:
+      type: object
+      required: [id, subdomain, url, internal_port, sync_status]
+      properties:
+        id: { type: string, pattern: '^domain-[0-9a-hjkmnp-tv-z]{8}$' }
+        subdomain: { type: string }
+        url: { type: string }
+        internal_port: { type: integer }
+        sync_status: { $ref: '#/components/schemas/SyncStatus' }
+    DomainList:
+      type: object
+      required: [items, limits]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Domain'
+        limits:
+          type: object
+          required: [per_vm]
+          properties:
+            per_vm: { type: integer }
+    Subdomain:
+      type: string
+      minLength: 1
+      maxLength: 63
+      pattern: '^[a-z0-9-]+$'
+      description: 영문 소문자·숫자·`-`. 예약어는 쓸 수 없다 (400 `VALIDATION_FAILED`)
+    CreateDomainRequest:
+      type: object
+      additionalProperties: false
+      required: [subdomain, internal_port]
+      properties:
+        subdomain: { $ref: '#/components/schemas/Subdomain' }
+        internal_port: { type: integer, minimum: 1, maximum: 65535 }
+    UpdateDomainRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        subdomain: { $ref: '#/components/schemas/Subdomain' }
+        internal_port: { type: integer, minimum: 1, maximum: 65535 }
+    FirewallRule:
+      type: object
+      required: [id, action, direction, protocol, dport, source]
+      properties:
+        id: { type: string, pattern: '^fwrule-[0-9a-hjkmnp-tv-z]{8}$' }
+        action: { type: string, enum: [accept, drop, reject] }
+        direction: { type: string, enum: [in, out] }
+        protocol: { type: string, enum: [tcp, udp, icmp] }
+        dport:
+          type: [string, 'null']
+          description: 단일 포트 또는 `시작:끝` 범위 (1~65535)
+        source:
+          type: [string, 'null']
+          description: IP 또는 CIDR
+    FirewallRulePage:
+      type: object
+      required: [enabled, items, limits, next_cursor]
+      properties:
+        enabled: { type: boolean }
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/FirewallRule'
+        limits:
+          type: object
+          required: [per_vm]
+          properties:
+            per_vm: { type: integer }
+        next_cursor:
+          type: [string, 'null']
+    CreateFirewallRuleRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        action: { type: string, enum: [accept, drop, reject], default: accept }
+        direction: { type: string, enum: [in, out], default: in }
+        protocol: { type: string, enum: [tcp, udp, icmp], default: tcp }
+        dport:
+          type: string
+          description: 단일 포트 또는 `시작:끝` 범위 (1~65535)
+        source:
+          type: string
+          description: IP 또는 CIDR
