@@ -3,7 +3,7 @@ info:
   title: GSMSV v2 Monitoring API
   version: 0.1.0
   description: |
-    알림 확인(9.1~9.6)과 관리자 인프라 현황(11.13~11.15). 서비스 상태 공개(28번)는 GSMSV 밖의 상태 페이지가 맡으므로 이 파일에 없다.
+    알림 확인(9.1~9.6), 관리자 인프라 현황(11.13~11.15), 상태 페이지 감시 도구가 보는 헬스 체크. 서비스 상태 공개(28번)의 `/api/status`는 GSMSV 밖의 상태 페이지가 맡으므로 이 파일에 없다.
 
     - 규칙의 원본은 [22번 권한 판단](../rules/authorization.md)이다
     - JSON 칸 이름은 snake_case, enum 값은 소문자다
@@ -32,7 +32,35 @@ tags:
     description: 알림 설정
   - name: Admin Infra
     description: 관리자 인프라 현황
+  - name: Health
+    description: 상태 페이지 감시 도구용 헬스 체크
 paths:
+  /actuator/health:
+    get:
+      tags: [Health]
+      operationId: getHealth
+      summary: 헬스 체크 (28번)
+      description: |
+        상태 페이지 감시 도구가 API 서버가 살아 있는지 확인한다. `/api/v2` 밖에 있는 운영용 경로다.
+        본문에는 `status`만 있다. 서버 대수·노드 이름·내부 IP·DB 종류 같은 내부 정보는 어떤 경우에도 넣지 않는다.
+
+        권한: 누구나 (로그인 불필요)
+      security: []
+      responses:
+        '200':
+          description: 정상
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+              example: { status: UP }
+        '503':
+          description: 정상이 아님
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+              example: { status: DOWN }
   /api/v2/notifications:
     get:
       tags: [Notification]
@@ -301,6 +329,12 @@ components:
         pattern: '^ntf-[0-9a-hjkmnp-tv-z]{8}$'
       example: ntf-4k8m2q9t
   schemas:
+    Health:
+      type: object
+      required: [status]
+      additionalProperties: false
+      properties:
+        status: { type: string, enum: [UP, DOWN] }
     Notification:
       type: object
       required: [id, kind, category, group, title, body, resource, read, created_at]
