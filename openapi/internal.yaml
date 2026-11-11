@@ -1,0 +1,527 @@
+openapi: 3.1.0
+info:
+  title: GSMSV v2 Internal API (Server → Infra)
+  version: 0.1.0
+  description: |
+    API 서버(Kotlin, GSMSV-Server-V2)가 실행 엔진(Go, GSMSV-Infra-V2)을 부르는 내부 API다. 브라우저는 이 API에 닿지 않는다.
+
+    - 공통 규약의 원본은 [내부 API 공통 규약](../rules/internal-api-rules.md)이다. 이 파일과 규약이 다르면 규약이 맞다
+    - 이 파일에는 공통 부품(헤더·오류·작업)과 헬스 체크, 작업 조회, 네트워크 맞추기(13.6·13.7)만 있다. 다른 엔드포인트는 Go 구현 전에 기능마다 PR로 더한다 (계약 먼저)
+    - 서비스 사이 인증은 모든 요청에 걸린다. 방식과 자격증명은 이 저장소에 쓰지 않는다 ([Kotlin·Go 경계](../policies/kotlin-go-boundary.md) 6.5). 인증에 실패하면 401 `UNAUTHENTICATED`다
+    - HTTP/1.1 + JSON이다. JSON 칸 이름은 snake_case, enum 값은 소문자다. 오류 `code`만 대문자다
+    - 받는 쪽은 모르는 칸을 무시한다. 선택 칸은 `null`과 칸이 없는 것을 같은 뜻으로 받는다
+    - 자원은 자원 id(`vm-…`, `port-…`, `domain-…`)로 가리킨다. GRN은 쓰지 않는다
+    - 모든 예시 값은 가짜 값이다 (주소는 RFC 5737 대역, 도메인은 `example.com`)
+servers:
+  - url: http://{host}
+    description: 실제 주소는 운영 정보라 쓰지 않는다
+    variables:
+      host:
+        default: infra.example.com
+tags:
+  - name: Health
+    description: 살아 있는지, 외부 시스템에 닿는지
+  - name: Job
+    description: 오래 걸리는 작업의 상태 조회와 취소
+  - name: Network
+    description: VM 포트 집합과 HTTPS 라우트 맞추기 (선언형)
+paths:
+  /healthz:
+    get:
+      tags: [Health]
+      operationId: getHealth
+      summary: 프로세스가 요청을 받을 수 있는지
+      description: |
+        외부 시스템(Proxmox·게이트웨이·Caddy·Kubernetes)을 보지 않고 바로 답한다. 인증 없이 부를 수 있다.
+        `boot_id`는 프로세스가 뜰 때마다 새로 정하는 값이다. 바뀌었으면 Infra가 다시 떴다는 뜻이고, Server는 선언형 상태를 모두 다시 보낸다 (규약 7장).
+      security: []
+      responses:
+        '200':
+          description: 살아 있다
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+              example:
+                status: up
+                boot_id: boot-k3m9x2p7q4ta
+  /readyz:
+    get:
+      tags: [Health]
+      operationId: getReadiness
+      summary: 외부 시스템에 닿는지
+      description: |
+        외부 시스템마다 닿는지를 확인해 답한다. 하나라도 닿지 않으면 503이다. 인증 없이 부를 수 있다.
+        본문에 주소·노드 이름·장비 정보를 넣지 않는다.
+      security: []
+      responses:
+        '200':
+          description: 모두 닿는다
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Readiness'
+              example:
+                status: up
+                checks: { proxmox: up, gateway: up, caddy: up, kubernetes: up }
+        '503':
+          description: 닿지 않는 외부 시스템이 있다
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Readiness'
+              example:
+                status: down
+                checks: { proxmox: up, gateway: down, caddy: up, kubernetes: up }
+  /jobs/{job_id}:
+    parameters:
+      - $ref: '#/components/parameters/JobId'
+      - $ref: '#/components/parameters/RequestId'
+    get:
+      tags: [Job]
+      operationId: getJob
+      summary: 작업 상태 (13.10)
+      description: |
+        Server가 폴링한다. 끝난 작업은 끝난 뒤 1시간 이상 남긴다. Infra가 다시 뜨면 작업 기록은 사라진다.
+        404를 받으면 Server는 대상 자원의 실제 상태를 Infra에 물어 복구한다 (규약 4.2).
+      responses:
+        '200':
+          description: 작업 상태
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+              examples:
+                running:
+                  value:
+                    job_id: job-5f6g7h8j9k2m
+                    type: vm.create
+                    resource_id: vm-k3m9x2p7q4ta
+                    status: running
+                    stage: cloning
+                    queue_position: 0
+                    created_at: '2026-11-12T09:00:00Z'
+                    updated_at: '2026-11-12T09:00:20Z'
+                    error: null
+                failed:
+                  value:
+                    job_id: job-5f6g7h8j9k2m
+                    type: vm.create
+                    resource_id: vm-k3m9x2p7q4ta
+                    status: failed
+                    stage: cloning
+                    queue_position: 0
+                    created_at: '2026-11-12T09:00:00Z'
+                    updated_at: '2026-11-12T09:01:05Z'
+                    error:
+                      code: VMID_TAKEN
+                      retryable: false
+                      details: { vmid: 101 }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /jobs/{job_id}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/JobId'
+      - $ref: '#/components/parameters/RequestId'
+    post:
+      tags: [Job]
+      operationId: cancelJob
+      summary: 작업 취소
+      description: |
+        `queued`면 바로 `canceled`가 된다. `running`이면 다음 단계로 넘어가기 전에 멈추고 만들다 만 것을 정리한 뒤 `canceled`가 된다.
+        이미 끝난 작업이면 아무것도 하지 않고 현재 상태를 준다. 여러 번 불러도 결과가 같다.
+      responses:
+        '202':
+          description: 취소를 받았다. 결과는 작업 상태 조회로 확인한다
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /network/vms/{vm_id}/ports:
+    parameters:
+      - $ref: '#/components/parameters/VmId'
+      - $ref: '#/components/parameters/RequestId'
+    put:
+      tags: [Network]
+      operationId: syncVmPorts
+      summary: VM 포트 집합 맞추기 (13.6)
+      description: |
+        이 VM의 포트 규칙 전체를 보낸다. Infra는 게이트웨이의 현재 규칙과 비교해 차이만 적용하고, 목록에 없는 이 VM의 규칙은 지운다.
+        `ports`가 비어 있으면 이 VM의 규칙을 모두 지운다 (VM 삭제 때). 규칙에는 `vm-…`·`port-…` id를 적어 둔다.
+        같은 VM에 대한 요청은 Infra 안에서 하나씩 차례로 처리한다. 같은 본문을 여러 번 보내도 결과가 같다.
+        반영에 실패하면 2xx가 아닌 상태로 답한다. 200이면 `applied`는 항상 `true`다.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VmPortsRequest'
+            example:
+              internal_ip: 192.0.2.23
+              ports:
+                - id: port-5q8w3n7z
+                  external: 40001
+                  internal: 22
+                  protocol: tcp
+                  allowed_source: null
+                - id: port-2x7c5v9b
+                  external: 40002
+                  internal: 8080
+                  protocol: tcp
+                  allowed_source: 203.0.113.0/24
+      responses:
+        '200':
+          description: 반영했다
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PortSyncResult'
+              example:
+                applied: true
+                added: 1
+                removed: 0
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/UpstreamUnavailable'
+        '504':
+          $ref: '#/components/responses/UpstreamTimeout'
+  /https/routes:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
+    put:
+      tags: [Network]
+      operationId: syncHttpsRoutes
+      summary: HTTPS 라우트 맞추기 (13.7)
+      description: |
+        활성 도메인 연결 **전체**로 만든 라우트 목록을 보낸다 ([23번 9장](../rules/resource-naming.md#9-https-도메인-연결의-인프라-부품)).
+        Infra는 Caddy의 사용자 라우트를 이 목록으로 한 번에 교체하고, 실패하면 이전 설정을 그대로 둔다.
+        사용자 라우트는 캐치올 라우트보다 앞에 둔다. 라우트의 id는 `domain-…`이다.
+        라우트 목록 전체에 대한 요청은 Infra 안에서 하나씩 차례로 처리한다. 200이면 `applied`는 항상 `true`다.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HttpsRoutesRequest'
+            example:
+              routes:
+                - id: domain-4k8m2q9t
+                  host: my-app.example.com
+                  upstream: 192.0.2.23:8080
+      responses:
+        '200':
+          description: 반영했다
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RouteSyncResult'
+              example:
+                applied: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/UpstreamUnavailable'
+        '504':
+          $ref: '#/components/responses/UpstreamTimeout'
+components:
+  headers:
+    RequestId:
+      description: 요청에 실려 온 `X-Request-Id`를 그대로 돌려준다. 없었으면 Infra가 만든 값이다
+      schema:
+        type: string
+        pattern: '^req-[A-Za-z0-9_-]{1,64}$'
+  parameters:
+    RequestId:
+      name: X-Request-Id
+      in: header
+      required: false
+      description: |
+        Server의 요청 id를 그대로 싣는다. Infra는 로그에 `request_id`로 남기고, 응답 헤더와 오류 본문에 같은 값을 넣는다.
+        Server는 항상 싣는다. 없거나 형식이 틀리면 Infra가 같은 형식으로 새로 만든다 (거절하지 않는다)
+      schema:
+        type: string
+        pattern: '^req-[A-Za-z0-9_-]{1,64}$'
+      example: req-3f2a9c1e7b6d4a58b0e2c4d6f8a1b3c5
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        명령형 작업 요청(VM 만들기·지우기·전원·사양·스냅샷)에 필수다. Server는 그 작업의 operation id(`op-…`)를 싣는다.
+        같은 키로 다시 오면 Infra는 새로 실행하지 않고 처음 작업을 202로 다시 준다. 같은 키에 본문이 다르면 422 `IDEMPOTENCY_KEY_REUSED`다
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9_-]{1,64}$'
+      example: op-7w8k9q0p1a2s
+    JobId:
+      name: job_id
+      in: path
+      required: true
+      description: Infra가 정한 작업 id. Server는 해석하지 않고 그대로 저장·전달한다
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9_-]{1,64}$'
+      example: job-5f6g7h8j9k2m
+    VmId:
+      name: vm_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^vm-[0-9a-hjkmnp-tv-z]{12}$'
+      example: vm-k3m9x2p7q4ta
+  schemas:
+    InternalError:
+      type: object
+      required: [code, retryable, request_id]
+      description: Infra의 모든 오류 응답 본문. 사람이 읽을 문장은 넣지 않는다 (규약 5장)
+      properties:
+        code:
+          type: string
+          description: 오류 종류. 대문자와 밑줄. 목록은 규약 5.3
+          example: VMID_TAKEN
+        retryable:
+          type: boolean
+          description: 같은 요청을 그대로 다시 보내도 되는지
+        details:
+          type: object
+          additionalProperties: true
+          description: 원인 데이터. 웹 API 오류의 `details`와 같은 칸 이름이다. 비밀값·자격증명은 넣지 않는다. 없으면 빠진다
+        request_id:
+          type: string
+    JobError:
+      type: object
+      required: [code, retryable]
+      description: 실패한 작업의 원인. `InternalError`에서 `request_id`만 뺀 모양이다. 정리까지 실패했으면 `details.cleanup`이 `failed`다
+      properties:
+        code: { type: string }
+        retryable: { type: boolean }
+        details:
+          type: object
+          additionalProperties: true
+    JobStatus:
+      type: string
+      enum: [queued, running, succeeded, failed, canceled]
+    Job:
+      type: object
+      required: [job_id, type, resource_id, status, stage, queue_position, created_at, updated_at]
+      properties:
+        job_id:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{1,64}$'
+        type:
+          type: string
+          description: 작업 종류. Server operation의 `type`과 같은 이름을 쓴다 (예 `vm.create`, `vm.delete`, `vm.power`, `vm.resize`, `snap.create`, `snap.delete`, `snap.restore`)
+        resource_id:
+          type: string
+          description: 작업 대상 자원 id
+        status:
+          $ref: '#/components/schemas/JobStatus'
+        stage:
+          type: string
+          description: 지금 단계. VM 만들기는 `queued` → `cloning` → `configuring` → `booting` → `networking`. 그 밖의 작업은 `queued` → `running`. 끝난 작업은 마지막 단계를 그대로 둔다
+        queue_position:
+          type: integer
+          minimum: 0
+          description: '`queued`일 때 앞에 기다리는 작업 수. 그 밖에는 0'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        error:
+          oneOf:
+            - $ref: '#/components/schemas/JobError'
+            - type: 'null'
+          description: '`failed`일 때만 값이 있다'
+    JobAccepted:
+      type: object
+      required: [job_id, status, queue_position]
+      description: 명령형 작업 요청을 받았을 때의 202 본문
+      properties:
+        job_id:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{1,64}$'
+        status:
+          $ref: '#/components/schemas/JobStatus'
+        queue_position:
+          type: integer
+          minimum: 0
+    Health:
+      type: object
+      required: [status, boot_id]
+      properties:
+        status:
+          type: string
+          enum: [up]
+        boot_id:
+          type: string
+          description: 프로세스가 뜰 때마다 새로 정하는 값. Server는 바뀌었는지만 본다
+    Readiness:
+      type: object
+      required: [status, checks]
+      properties:
+        status:
+          type: string
+          enum: [up, down]
+        checks:
+          type: object
+          description: 외부 시스템마다 `up` 또는 `down`. 이름에 주소·노드 이름을 넣지 않는다
+          additionalProperties:
+            type: string
+            enum: [up, down]
+    Protocol:
+      type: string
+      enum: [tcp, udp]
+    VmPortRule:
+      type: object
+      required: [id, external, internal, protocol]
+      properties:
+        id:
+          type: string
+          pattern: '^port-[0-9a-hjkmnp-tv-z]{8}$'
+        external:
+          type: integer
+          minimum: 1
+          maximum: 65535
+          description: 외부 포트. 고르는 규칙은 인프라 담당이 비공개 문서로 정한다
+        internal:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        protocol:
+          $ref: '#/components/schemas/Protocol'
+        allowed_source:
+          type: [string, 'null']
+          description: 허용할 출발 IP 또는 CIDR. `null`이거나 빠지면 모두 허용
+    VmPortsRequest:
+      type: object
+      required: [internal_ip, ports]
+      properties:
+        internal_ip:
+          type: string
+          description: 이 VM의 내부 IP (IPv4)
+        ports:
+          type: array
+          items:
+            $ref: '#/components/schemas/VmPortRule'
+    PortSyncResult:
+      type: object
+      required: [applied, added, removed]
+      properties:
+        applied:
+          type: boolean
+          description: 200이면 항상 `true`
+        added:
+          type: integer
+          minimum: 0
+          description: 새로 넣은 규칙 수
+        removed:
+          type: integer
+          minimum: 0
+          description: 지운 규칙 수
+    HttpsRoute:
+      type: object
+      required: [id, host, upstream]
+      properties:
+        id:
+          type: string
+          pattern: '^domain-[0-9a-hjkmnp-tv-z]{8}$'
+        host:
+          type: string
+          description: 연결할 전체 도메인 이름
+        upstream:
+          type: string
+          description: '보낼 곳. `{내부 IP}:{포트}`'
+    HttpsRoutesRequest:
+      type: object
+      required: [routes]
+      properties:
+        routes:
+          type: array
+          items:
+            $ref: '#/components/schemas/HttpsRoute'
+    RouteSyncResult:
+      type: object
+      required: [applied]
+      properties:
+        applied:
+          type: boolean
+          description: 200이면 항상 `true`
+  responses:
+    BadRequest:
+      description: |
+        요청 형식 오류. `code`는 `INVALID_REQUEST`(JSON·필수 칸·값 범위) 또는 `INVALID_RESOURCE_ID`(id 형식)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/InternalError'
+    Unauthenticated:
+      description: 서비스 사이 인증에 실패했다 (`UNAUTHENTICATED`)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/InternalError'
+    NotFound:
+      description: Infra가 대상을 찾지 못했다 (`RESOURCE_NOT_FOUND`, `JOB_NOT_FOUND`)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/InternalError'
+    Conflict:
+      description: 다른 것과 부딪혀 적용할 수 없다 (`ALREADY_EXISTS`, `VMID_TAKEN`, `PORT_TAKEN`, `INVALID_STATE`). `retryable`은 `false`다
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/InternalError'
+    Internal:
+      description: Infra 안의 예상하지 못한 오류 (`INTERNAL`). `retryable`은 `false`다
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/InternalError'
+    UpstreamUnavailable:
+      description: Proxmox·게이트웨이·Caddy·Kubernetes가 응답하지 않는다 (`UPSTREAM_UNAVAILABLE`). `retryable`은 `true`다
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/InternalError'
+    UpstreamTimeout:
+      description: Infra 안에서 시간 안에 끝내지 못했다 (`UPSTREAM_TIMEOUT`). `retryable`은 `true`다
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/InternalError'

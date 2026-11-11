@@ -11,7 +11,7 @@
 - 이 저장소는 공개 저장소다. 명세에 **실제 서버 주소, 내부 IP, 노드·장비 이름, 실제 도메인, 실제 학번·이메일, 비밀값을 쓰지 않는다.**
   - OpenAPI의 `servers` 항목에는 실제 주소 대신 `https://{host}` 같은 자리표시를 쓴다
   - 예시 값(`example`)에는 `example.com`, `user-aaaaaaaaaaaa` 같은 가짜 값을 쓴다
-- 내부 API(Server ↔ Infra)는 이 점검표의 범위가 아니다. 책임 나눔은 [Kotlin·Go 경계](../policies/kotlin-go-boundary.md)에 있다
+- 내부 API(Server ↔ Infra)는 이 점검표의 범위가 아니다. 책임 나눔은 [Kotlin·Go 경계](../policies/kotlin-go-boundary.md)에, 주고받는 형식은 [내부 API 공통 규약](internal-api-rules.md)에 있다
 
 ## 2. 점검표
 
@@ -76,4 +76,3 @@ GRN·id 파서가 거절하는 경우는 400이다. 아래 세 경우 모두 DB�
 
 - 다른 저장소로 계약을 전달하는 방법, 생성한 코드를 커밋할지, 버전 태그 규칙, 깨지는 변경의 처리
 - 이 저장소의 `develop`에서 API 변경을 승인하는 규칙
-- Server ↔ Infra 사이 형식(REST + OpenAPI 또는 gRPC)

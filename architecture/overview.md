@@ -94,6 +94,7 @@
 | 7 | [할당량](../policies/quota.md) · [기능별 정책](../policies/feature-policies.md) | 한도와 기능별로 정한 정책 |
 | 8 | [데이터베이스](../services/database.md) · [서버리스](../services/serverless.md) · [원터치 배포](../services/one-touch-deploy.md) | 서비스 기획 요약 |
 | 9 | [Kotlin·Go 경계](../policies/kotlin-go-boundary.md) | API 서버와 실행 엔진의 책임 나눔 (대부분 제안 단계) |
+| 10 | [내부 API 공통 규약](../rules/internal-api-rules.md) · [내부 API 명세](../openapi/internal.yaml) | API 서버와 실행 엔진이 주고받는 형식 (헤더·오류·작업·재시도) |
 
 ## 9. 이 저장소에 쓰지 않는 것
 

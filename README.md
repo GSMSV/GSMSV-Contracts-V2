@@ -7,6 +7,7 @@ GSMSV v2 저장소들이 함께 쓰는 약속을 두는 곳이다.
 ## 이 저장소에 두는 것
 
 - **웹 API 명세** (Client ↔ Server): OpenAPI 형식. API를 새로 만들거나 바꿀 때는 구현보다 이 저장소의 명세 PR을 먼저 올린다 (계약 먼저)
+- **내부 API 명세** (Server → Infra): [공통 규약](rules/internal-api-rules.md)과 OpenAPI [명세](openapi/internal.yaml). 웹 API와 같이 계약 먼저다
 - **자원 이름 규칙 상수** (접두사·정규식·생성 길이): 원본을 여기 한 곳에 두고 Kotlin·Go·React 상수를 만든다
 
 폴더 구조, 상수 파일 형식, 다른 저장소로 전달하는 방법은 아직 정하지 않았다.
