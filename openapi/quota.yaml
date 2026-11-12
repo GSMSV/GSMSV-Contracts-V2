@@ -1,0 +1,193 @@
+openapi: 3.1.0
+info:
+  title: GSMSV v2 Quota API
+  version: 0.1.0
+  description: |
+    내 한도와 사용량 (Quota 4.2). 생성 화면이 남은 한도를 보여 주고 슬라이더 최대값을 정하는 데 쓴다.
+
+    - 규칙의 원본은 [27번 사용량 할당량](../policies/quota.md), [24번 DBaaS 7장](../services/database.md),
+      [15번 서버리스 8장](../services/serverless.md), [25번 원터치 배포 8장](../services/one-touch-deploy.md)이다
+    - JSON 칸 이름은 snake_case다
+    - 오류 본문은 공통 형식 `{ code, message, request_id, details? }`다. 이 API는 공통 오류(401)만 쓴다
+    - 개인 자원만 센다. 팀 자원은 팀 앞으로 세므로 여기에 넣지 않는다. 팀 한도는 팀 상세(3.3)의 `quota`에 있다
+    - 한도 값은 모두 배포 없이 바꿀 수 있는 설정값이다. 아래 예시의 숫자는 지금 기획 값일 뿐이다
+servers:
+  - url: https://{host}
+    variables:
+      host:
+        default: example.com
+security:
+  - accessToken: []
+tags:
+  - name: Quota
+    description: 내 한도와 사용량
+paths:
+  /api/v2/users/me/quota:
+    get:
+      tags: [Quota]
+      operationId: getMyQuota
+      summary: 내 한도와 사용량 (4.2)
+      description: |
+        요청자 본인의 개인 자원 한도(`limit`)와 지금 쓰고 있는 양(`used`)을 준다.
+
+        - **관리자**는 개인 VM에 1인 한도가 없으므로([27번 3장](../policies/quota.md)) `vm.*.limit`이 `null`이다.
+          DB·서버리스·앱 한도는 관리자에게도 일반 사용자와 같은 값을 준다 ([27번 3장](../policies/quota.md))
+        - `used`는 개인 자원의 합계다. 삭제가 끝날 때까지 센다. 삭제 중(`deleting`)인 자원과 만료로 정지된 유예 중 자원도 들어간다 ([27번 1장](../policies/quota.md))
+        - `vm.max_creatable`은 새 개인 VM 하나에 줄 수 있는 최대 사양이다. 생성 화면 슬라이더의 최대값으로 쓴다 (`MaxCreatable` 참고)
+
+        권한: 본인
+      responses:
+        '200':
+          description: 내 한도와 사용량
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MyQuota'
+              examples:
+                user:
+                  summary: 일반 사용자
+                  value:
+                    vm:
+                      vcpu: { used: 2, limit: 4 }
+                      ram_gb: { used: 4, limit: 8 }
+                      ssd_gb: { used: 20, limit: 30 }
+                      max_creatable: { vcpu: 2, ram_gb: 4, ssd_gb: 10 }
+                    db:
+                      count: { used: 1, limit: 2 }
+                      shared_storage_gb: { used: 0.12, limit: 1 }
+                    fn:
+                      count: { used: 0, limit: 3 }
+                      daily_executions: { used: 0, limit: 10000 }
+                    app:
+                      count: { used: 1, limit: 2 }
+                      memory_mb: { used: 512, limit: 2048 }
+                      always_on: { used: 0, limit: 1 }
+                admin:
+                  summary: 관리자 (노드 여유를 받기 전)
+                  value:
+                    vm:
+                      vcpu: { used: 6, limit: null }
+                      ram_gb: { used: 12, limit: null }
+                      ssd_gb: { used: 80, limit: null }
+                      max_creatable: { vcpu: null, ram_gb: null, ssd_gb: null }
+                    db:
+                      count: { used: 0, limit: 2 }
+                      shared_storage_gb: { used: 0, limit: 1 }
+                    fn:
+                      count: { used: 0, limit: 3 }
+                      daily_executions: { used: 0, limit: 10000 }
+                    app:
+                      count: { used: 0, limit: 2 }
+                      memory_mb: { used: 0, limit: 2048 }
+                      always_on: { used: 0, limit: 1 }
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+components:
+  securitySchemes:
+    accessToken:
+      $ref: './components/common.yaml#/components/securitySchemes/accessToken'
+  schemas:
+    QuotaUsage:
+      type: object
+      description: 한도를 낮추면 `used`가 `limit`보다 클 수 있다. 화면은 100%를 넘는 값도 그릴 수 있어야 한다
+      required: [used, limit]
+      properties:
+        used:
+          type: integer
+          minimum: 0
+        limit:
+          type: integer
+          minimum: 0
+    VmQuotaUsage:
+      type: object
+      description: VM 할당량. 관리자는 1인 한도가 없어 `limit`이 `null`이다. 한도를 낮추면 `used`가 `limit`보다 클 수 있다
+      required: [used, limit]
+      properties:
+        used:
+          type: integer
+          minimum: 0
+        limit:
+          type: [integer, 'null']
+          minimum: 0
+    StorageQuotaUsage:
+      type: object
+      description: |
+        용량(GiB). DB 상세의 `storage`처럼 소수로 준다.
+        DB 용량은 한도를 넘어도 정상 상태라서(넘으면 쓰기 금지, [24번 7장](../services/database.md)) `used`가 `limit`보다 클 수 있다
+      required: [used, limit]
+      properties:
+        used:
+          type: number
+          minimum: 0
+        limit:
+          type: number
+          minimum: 0
+    MaxCreatable:
+      type: object
+      description: |
+        새 개인 VM 하나에 줄 수 있는 최대 사양. 세 값을 따로 정한다. 규칙의 원본은 [27번 7장](../policies/quota.md)이다.
+
+        - 일반 사용자: `min(남은 1인 한도, 남은 일반 몫, 한 노드에 들어가는 크기)`. 음수면 `0`이다
+        - 관리자: 한 노드에 들어가는 크기
+        - 노드 값을 받기 전에는 남은 1인 한도만으로 정한다(일반 몫·노드 여유는 보지 않는다). 관리자는 이때 `null`(모름)이다
+        - 세 값을 모두 최대로 고른 조합은 어느 노드에도 들어가지 않아 생성이 거부될 수 있다
+        - 이 값이 운영체제 최소 사양([27번 5장](../policies/quota.md))보다 작으면 VM을 만들 수 없다. 최소 사양을 클라이언트에 주는 방법은 아직 정하지 않았다 ([27번 8장](../policies/quota.md))
+      required: [vcpu, ram_gb, ssd_gb]
+      properties:
+        vcpu:
+          type: [integer, 'null']
+          minimum: 0
+        ram_gb:
+          type: [integer, 'null']
+          minimum: 0
+        ssd_gb:
+          type: [integer, 'null']
+          minimum: 0
+    MyQuota:
+      type: object
+      required: [vm, db, fn, app]
+      properties:
+        vm:
+          type: object
+          description: 개인 VM 할당량. 칸 이름은 `_gb`지만 RAM·SSD 값은 1024 단위(GiB)다 ([27번 5장](../policies/quota.md))
+          required: [vcpu, ram_gb, ssd_gb, max_creatable]
+          properties:
+            vcpu:
+              $ref: '#/components/schemas/VmQuotaUsage'
+            ram_gb:
+              $ref: '#/components/schemas/VmQuotaUsage'
+            ssd_gb:
+              $ref: '#/components/schemas/VmQuotaUsage'
+            max_creatable:
+              $ref: '#/components/schemas/MaxCreatable'
+        db:
+          type: object
+          description: 개인 DB. `count`는 개인 DB 개수, `shared_storage_gb`는 공유형 DB 크기 합계(GiB)다. 백업 공간은 넣지 않는다
+          required: [count, shared_storage_gb]
+          properties:
+            count:
+              $ref: '#/components/schemas/QuotaUsage'
+            shared_storage_gb:
+              $ref: '#/components/schemas/StorageQuotaUsage'
+        fn:
+          type: object
+          description: 개인 서버리스 함수. `daily_executions`는 오늘(서울 시간대 자정부터) 실행 횟수다 ([15번 8장](../services/serverless.md))
+          required: [count, daily_executions]
+          properties:
+            count:
+              $ref: '#/components/schemas/QuotaUsage'
+            daily_executions:
+              $ref: '#/components/schemas/QuotaUsage'
+        app:
+          type: object
+          description: |
+            개인 앱. `count`는 앱 개수, `memory_mb`는 모든 칸의 메모리 할당량 합계(MiB, 잠든 칸·PR 환경 포함),
+            `always_on`은 상시 실행을 켠 칸 개수다
+          required: [count, memory_mb, always_on]
+          properties:
+            count:
+              $ref: '#/components/schemas/QuotaUsage'
+            memory_mb:
+              $ref: '#/components/schemas/QuotaUsage'
+            always_on:
+              $ref: '#/components/schemas/QuotaUsage'
