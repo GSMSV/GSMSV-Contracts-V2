@@ -6,11 +6,11 @@ info:
     API 서버(Kotlin, GSMSV-Server-V2)가 실행 엔진(Go, GSMSV-Infra-V2)을 부르는 내부 API다. 브라우저는 이 API에 닿지 않는다.
 
     - 공통 규약의 원본은 [내부 API 공통 규약](../rules/internal-api-rules.md)이다. 이 파일과 규약이 다르면 규약이 맞다
-    - 이 파일에는 공통 부품(헤더·오류·작업)과 헬스 체크, 작업 조회, 네트워크 맞추기(13.6·13.7)만 있다. 다른 엔드포인트는 Go 구현 전에 기능마다 PR로 더한다 (계약 먼저)
+    - 이 파일에는 공통 부품(헤더·오류·작업)과 헬스 체크, 작업 조회, 네트워크 맞추기(13.6·13.7, VM 방화벽)만 있다. 다른 엔드포인트는 Go 구현 전에 기능마다 PR로 더한다 (계약 먼저)
     - 서비스 사이 인증은 모든 요청에 걸린다. 방식과 자격증명은 이 저장소에 쓰지 않는다 ([Kotlin·Go 경계](../policies/kotlin-go-boundary.md) 6.5). 인증에 실패하면 401 `UNAUTHENTICATED`다
     - HTTP/1.1 + JSON이다. JSON 칸 이름은 snake_case, enum 값은 소문자다. 오류 `code`만 대문자다
     - 받는 쪽은 모르는 칸을 무시한다. 선택 칸은 `null`과 칸이 없는 것을 같은 뜻으로 받는다
-    - 자원은 자원 id(`vm-…`, `port-…`, `domain-…`)로 가리킨다. GRN은 쓰지 않는다
+    - 자원은 자원 id(`vm-…`, `port-…`, `domain-…`, `fwrule-…`)로 가리킨다. GRN은 쓰지 않는다
     - 모든 예시 값은 가짜 값이다 (주소는 RFC 5737 대역, 도메인은 `example.com`)
 servers:
   - url: http://{host}
@@ -24,7 +24,7 @@ tags:
   - name: Job
     description: 오래 걸리는 작업의 상태 조회와 취소
   - name: Network
-    description: VM 포트 집합과 HTTPS 라우트 맞추기 (선언형)
+    description: VM 포트 집합, HTTPS 라우트, VM 방화벽 맞추기 (선언형)
 paths:
   /healthz:
     get:
@@ -255,6 +255,94 @@ paths:
           $ref: '#/components/responses/UpstreamUnavailable'
         '504':
           $ref: '#/components/responses/UpstreamTimeout'
+  /network/vms/{vm_id}/firewall:
+    parameters:
+      - $ref: '#/components/parameters/VmId'
+      - $ref: '#/components/parameters/RequestId'
+    put:
+      tags: [Network]
+      operationId: syncVmFirewall
+      summary: VM 방화벽 맞추기 (웹 API 5.14~5.16)
+      description: |
+        이 VM의 방화벽 원하는 상태 **전체**(켜짐 여부와 규칙 목록)를 보낸다. Infra는 가상화 서버의 VM 방화벽과 비교해 차이만 적용하고, 목록에 없는 이 VM의 규칙은 지운다.
+        규칙에는 `fwrule-…` id를 적어 둔다. `rules`가 비어 있으면 이 VM의 규칙을 모두 지운다.
+
+        - `rules`의 순서가 규칙을 검사하는 순서다. Infra는 받은 순서 그대로 둔다. Server는 만든 순서(오래된 것 먼저)로 보낸다
+        - `enabled`는 VM 방화벽을 켤지다. `false`여도 받은 규칙 목록은 그대로 맞춰 두고, 검사만 하지 않는다
+        - `direction: in` 규칙의 목적지는 `internal_ip`로 고정한다. 규칙 값에는 목적지 칸이 없다 (웹 API 5.15의 목적지 강제)
+        - `protocol: icmp` 규칙에는 `dport`를 싣지 않는다. 실려 오면 400 `INVALID_REQUEST`다
+        - 규칙 값(`accept`, `in`, `tcp` 등)을 가상화 서버의 값으로 바꾸는 일은 Infra가 한다
+        - 이 VM이 가상화 서버에 없으면 404 `RESOURCE_NOT_FOUND`다. 단, `enabled: false`이고 `rules`가 비어 있으면(지울 것만 있으면) 200으로 답한다 (VM 삭제 뒤 다시 보내도 같은 결과)
+        - 이 VM을 만들거나 지우는 중이라 방화벽을 바꿀 수 없으면 409 `INVALID_STATE`다
+        - 규칙 개수 한도는 Server가 검사한다. Infra는 개수로 거절하지 않는다
+
+        같은 VM에 대한 요청은 Infra 안에서 하나씩 차례로 처리한다. 같은 본문을 여러 번 보내도 결과가 같다.
+        반영에 실패하면 2xx가 아닌 상태로 답하고, 이 VM의 방화벽은 요청 전 상태로 둔다. 200이면 `applied`는 항상 `true`다.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VmFirewallRequest'
+            examples:
+              rules:
+                summary: 규칙이 있는 VM
+                value:
+                  internal_ip: 192.0.2.23
+                  enabled: true
+                  rules:
+                    - id: fwrule-7m3k9p2x
+                      action: accept
+                      direction: in
+                      protocol: tcp
+                      dport: '80'
+                      source: 203.0.113.0/24
+                    - id: fwrule-4n8q2w6z
+                      action: accept
+                      direction: in
+                      protocol: tcp
+                      dport: '8000:8100'
+                      source: null
+                    - id: fwrule-9c3v5b7x
+                      action: drop
+                      direction: in
+                      protocol: icmp
+                      dport: null
+                      source: null
+              cleared:
+                summary: 규칙을 모두 지움 (VM 삭제 때)
+                value:
+                  internal_ip: 192.0.2.23
+                  enabled: false
+                  rules: []
+      responses:
+        '200':
+          description: 반영했다
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FirewallSyncResult'
+              example:
+                applied: true
+                added: 1
+                removed: 0
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/UpstreamUnavailable'
+        '504':
+          $ref: '#/components/responses/UpstreamTimeout'
 components:
   headers:
     RequestId:
@@ -439,6 +527,60 @@ components:
           items:
             $ref: '#/components/schemas/VmPortRule'
     PortSyncResult:
+      type: object
+      required: [applied, added, removed]
+      properties:
+        applied:
+          type: boolean
+          description: 200이면 항상 `true`
+        added:
+          type: integer
+          minimum: 0
+          description: 새로 넣은 규칙 수
+        removed:
+          type: integer
+          minimum: 0
+          description: 지운 규칙 수
+    FirewallRule:
+      type: object
+      required: [id, action, direction, protocol]
+      description: '웹 API의 `FirewallRule`과 같은 칸·값이다. 목적지 칸은 없다 (`direction: in`이면 `internal_ip`로 고정)'
+      properties:
+        id:
+          type: string
+          pattern: '^fwrule-[0-9a-hjkmnp-tv-z]{8}$'
+        action:
+          type: string
+          enum: [accept, drop, reject]
+        direction:
+          type: string
+          enum: [in, out]
+        protocol:
+          type: string
+          enum: [tcp, udp, icmp]
+        dport:
+          type: [string, 'null']
+          pattern: '^[0-9]{1,5}(:[0-9]{1,5})?$'
+          description: 단일 포트 또는 `시작:끝` 범위 (1~65535, 시작 ≤ 끝). `null`이거나 빠지면 모든 포트. `icmp`에는 싣지 않는다
+        source:
+          type: [string, 'null']
+          description: 출발 IP 또는 CIDR (IPv4·IPv6). `null`이거나 빠지면 모든 출발지
+    VmFirewallRequest:
+      type: object
+      required: [internal_ip, enabled, rules]
+      properties:
+        internal_ip:
+          type: string
+          description: '이 VM의 내부 IP (IPv4). `direction: in` 규칙의 목적지가 된다'
+        enabled:
+          type: boolean
+          description: VM 방화벽을 켤지
+        rules:
+          type: array
+          description: 이 VM의 규칙 전체. 순서가 검사 순서다
+          items:
+            $ref: '#/components/schemas/FirewallRule'
+    FirewallSyncResult:
       type: object
       required: [applied, added, removed]
       properties:
