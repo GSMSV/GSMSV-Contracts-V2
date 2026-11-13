@@ -6,7 +6,7 @@ info:
     API 서버(Kotlin, GSMSV-Server-V2)가 실행 엔진(Go, GSMSV-Infra-V2)을 부르는 내부 API다. 브라우저는 이 API에 닿지 않는다.
 
     - 공통 규약의 원본은 [내부 API 공통 규약](../rules/internal-api-rules.md)이다. 이 파일과 규약이 다르면 규약이 맞다
-    - 이 파일에는 공통 부품(헤더·오류·작업)과 헬스 체크, 작업 조회, 네트워크 맞추기(13.6·13.7)만 있다. 다른 엔드포인트는 Go 구현 전에 기능마다 PR로 더한다 (계약 먼저)
+    - 이 파일에는 공통 부품(헤더·오류·작업)과 헬스 체크, 작업 조회, VM 만들기·지우기·실제 상태(13.1·13.2), 네트워크 맞추기(13.6·13.7)만 있다. 다른 엔드포인트는 Go 구현 전에 기능마다 PR로 더한다 (계약 먼저)
     - 서비스 사이 인증은 모든 요청에 걸린다. 방식과 자격증명은 이 저장소에 쓰지 않는다 ([Kotlin·Go 경계](../policies/kotlin-go-boundary.md) 6.5). 인증에 실패하면 401 `UNAUTHENTICATED`다
     - HTTP/1.1 + JSON이다. JSON 칸 이름은 snake_case, enum 값은 소문자다. 오류 `code`만 대문자다
     - 받는 쪽은 모르는 칸을 무시한다. 선택 칸은 `null`과 칸이 없는 것을 같은 뜻으로 받는다
@@ -23,6 +23,8 @@ tags:
     description: 살아 있는지, 외부 시스템에 닿는지
   - name: Job
     description: 오래 걸리는 작업의 상태 조회와 취소
+  - name: Vm
+    description: VM 만들기·지우기와 실제 상태 조회
   - name: Network
     description: VM 포트 집합과 HTTPS 라우트 맞추기 (선언형)
 paths:
@@ -150,6 +152,161 @@ paths:
           $ref: '#/components/responses/Unauthenticated'
         '404':
           $ref: '#/components/responses/NotFound'
+  /vms:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
+    post:
+      tags: [Vm]
+      operationId: createVm
+      summary: VM 만들기 (13.1)
+      description: |
+        Server가 정한 노드·VM 번호·사양으로 VM을 만든다. 요청을 받으면 바로 `202`로 작업을 주고, 실제 생성은 뒤에서 한다 (규약 4.2).
+
+        - 단계: `queued`(그 노드·저장소의 클론 줄에서 기다린다) → `cloning`(템플릿을 복제한다) → `configuring`(CPU·메모리·cloud-init을 넣고 디스크를 `ssd_gb`로 늘린다) → `booting`(켠다) → `networking`(켜진 VM이 준비됐는지 확인한다). 사용자에게 보이는 단계(대기 중 → 복제 중 → 설정 중 → 부팅 중 → 네트워크 등록 중 → 완료)와 하나씩 맞는다
+        - Proxmox VM 이름은 `id`(`vm-…`)다. 그 뒤 호출은 `vm_id`만 보내고, Infra가 이 이름으로 노드와 VM 번호를 찾는다 (규약 2.1)
+        - 포트 규칙·HTTPS 라우트는 이 작업에 들어가지 않는다. Server가 선언형 맞추기(13.6·13.7)로 따로 보낸다. 규칙은 VM이 없어도 들어가므로 `202`를 받은 뒤 바로 보내도 된다
+        - 접수 전에 동기로 하는 검사: 본문·id 형식, 멱등 키, 같은 `id`로 끝나지 않은 작업이 있는지(있으면 409 `INVALID_STATE`), 같은 이름의 VM이 Proxmox에 이미 있는지(있으면 409 `ALREADY_EXISTS`, 규약 4.3). 그 밖의 실패는 작업의 `error`로 알린다
+        - 작업 실패 code: `VMID_TAKEN`(그 노드에서 VM 번호를 이미 쓴다. Server는 다음 후보로 새 요청을 만든다, 규약 5.3), `NODE_CAPACITY`(Proxmox가 자원이 모자라 거절했다), `TEMPLATE_NOT_FOUND`(그 노드에 `image` 템플릿이 없다), `DISK_SHRINK_NOT_ALLOWED`(`ssd_gb`가 템플릿 디스크보다 작다), `UPSTREAM_UNAVAILABLE`, `UPSTREAM_TIMEOUT`, `INTERNAL`
+        - 실패하거나 취소되면 만들다 만 VM을 지운다. 지우기까지 실패하면 `error.details.cleanup`이 `failed`다 (규약 4.2)
+        - `cloud_init.password`는 로그·오류 본문·작업 상태 어디에도 넣지 않는다
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VmCreateRequest'
+            example:
+              id: vm-k3m9x2p7q4ta
+              node: node-a
+              vmid: 101
+              image: ubuntu-24.04
+              vcpu: 2
+              memory_mb: 4096
+              ssd_gb: 20
+              internal_ip: 192.0.2.23
+              cloud_init:
+                user: ubuntu
+                password: example-password-1
+                hostname: web
+      responses:
+        '202':
+          description: 작업을 받았다. 결과는 작업 상태 조회(13.10)로 확인한다
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobAccepted'
+              example:
+                job_id: job-5f6g7h8j9k2m
+                status: queued
+                queue_position: 1
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/UpstreamUnavailable'
+        '504':
+          $ref: '#/components/responses/UpstreamTimeout'
+  /vms/{vm_id}:
+    parameters:
+      - $ref: '#/components/parameters/VmId'
+      - $ref: '#/components/parameters/RequestId'
+    get:
+      tags: [Vm]
+      operationId: getVm
+      summary: VM 실제 상태
+      description: |
+        Proxmox에 있는 이 VM의 지금 상태를 준다. 캐시를 쓰지 않고 바로 묻는다.
+
+        - Server가 작업 기록을 잃었을 때(`GET /jobs/{job_id}`가 404 `JOB_NOT_FOUND`) operation을 마무리하는 데 쓴다 (규약 4.2). 만들기였으면 VM이 생겼는지, 지우기였으면 VM이 없어졌는지 본다
+        - 이 이름의 VM이 없으면 404 `RESOURCE_NOT_FOUND`다
+        - `node`·`vmid`는 사용자 응답에 옮기지 않는다 (노드 숨기기)
+      responses:
+        '200':
+          description: VM의 지금 상태
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VmState'
+              example:
+                id: vm-k3m9x2p7q4ta
+                node: node-a
+                vmid: 101
+                power: running
+                vcpu: 2
+                memory_mb: 4096
+                ssd_gb: 20
+                observed_at: '2026-11-14T09:00:05Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/UpstreamUnavailable'
+        '504':
+          $ref: '#/components/responses/UpstreamTimeout'
+    delete:
+      tags: [Vm]
+      operationId: deleteVm
+      summary: VM 지우기 (13.2)
+      description: |
+        VM을 지운다. 켜져 있으면 끄고, VM과 그 디스크·스냅샷·cloud-init 데이터를 지운다. 요청을 받으면 바로 `202`로 작업을 주고, 실제 삭제는 뒤에서 한다. 단계는 `queued` → `running`이다.
+
+        - 포트 규칙·HTTPS 라우트는 이 작업에 들어가지 않는다. Server가 선언형 맞추기로 이 VM을 뺀 목록을 보내 회수한다 (규약 4.1)
+        - 이 VM을 대상으로 끝나지 않은 작업이 있으면 409 `INVALID_STATE`다. 만들기가 진행 중이라 Proxmox에 VM이 아직 없어도 같다. 만드는 중인 VM을 지우려면 Server가 먼저 그 작업을 취소한다 (`POST /jobs/{job_id}/cancel`)
+        - 이 이름의 VM이 없으면 404 `RESOURCE_NOT_FOUND`다. Server는 지우기 요청의 404를 이미 지워진 것으로 보고 operation을 성공으로 끝낸다. Infra가 다시 떠서 멱등 키 기억을 잃은 뒤 같은 요청을 다시 받은 경우도 이렇게 끝난다
+        - 작업 도중 VM이 이미 사라졌으면 성공으로 끝낸다
+        - 작업 실패 code: `UPSTREAM_UNAVAILABLE`, `UPSTREAM_TIMEOUT`, `INTERNAL`
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: 작업을 받았다. 결과는 작업 상태 조회(13.10)로 확인한다
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobAccepted'
+              example:
+                job_id: job-8q4n6c3v2k7m
+                status: queued
+                queue_position: 0
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/UpstreamUnavailable'
+        '504':
+          $ref: '#/components/responses/UpstreamTimeout'
   /network/vms/{vm_id}/ports:
     parameters:
       - $ref: '#/components/parameters/VmId'
@@ -403,6 +560,98 @@ components:
           additionalProperties:
             type: string
             enum: [up, down]
+    VmCreateRequest:
+      type: object
+      required: [id, node, vmid, image, vcpu, memory_mb, ssd_gb, internal_ip, cloud_init]
+      properties:
+        id:
+          type: string
+          pattern: '^vm-[0-9a-hjkmnp-tv-z]{12}$'
+          description: 만들 VM의 자원 id. Proxmox VM 이름이 된다
+        node:
+          type: string
+          pattern: '^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$'
+          description: VM을 만들 Proxmox 노드 이름. Server가 고른다. Infra가 맡지 않은 노드면 400 `INVALID_REQUEST`다
+        vmid:
+          type: integer
+          minimum: 100
+          maximum: 999999999
+          description: Proxmox VM 번호. Server가 고른 후보다. 그 노드에서 이미 쓰면 작업이 `VMID_TAKEN`으로 실패한다
+        image:
+          type: string
+          pattern: '^[a-z0-9]+([.-][a-z0-9]+)*$'
+          maxLength: 64
+          description: 운영체제 이미지 id. 웹 API 「고를 수 있는 운영체제 목록」의 `id`와 같다 (예 `ubuntu-24.04`). Infra는 그 노드에서 이 이름의 템플릿을 복제한다
+        vcpu:
+          type: integer
+          minimum: 1
+        memory_mb:
+          type: integer
+          minimum: 1
+          description: 메모리 (MiB)
+        ssd_gb:
+          type: integer
+          minimum: 1
+          description: 루트 디스크 크기 (GiB). 템플릿 디스크보다 작으면 작업이 `DISK_SHRINK_NOT_ALLOWED`로 실패한다
+        internal_ip:
+          type: string
+          format: ipv4
+          description: 이 VM의 내부 IP (IPv4). 접두 길이·게이트웨이·DNS는 운영 정보라 Infra 설정에서 가져온다
+        cloud_init:
+          $ref: '#/components/schemas/VmCloudInit'
+    VmCloudInit:
+      type: object
+      required: [user, password, hostname]
+      description: 첫 부팅 때 cloud-init이 VM에 넣을 값
+      properties:
+        user:
+          type: string
+          pattern: '^[a-z_][a-z0-9_-]{0,31}$'
+          description: 접속 사용자 이름 (예 `ubuntu`)
+        password:
+          type: string
+          minLength: 8
+          maxLength: 128
+          description: 그 사용자의 초기 비밀번호 평문. Server가 만들어 암호화해 저장한 값을 넘긴다. Infra는 이 값을 Proxmox cloud-init 설정에만 쓰고 로그·오류 본문·작업 상태에 넣지 않는다
+        hostname:
+          type: string
+          pattern: '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+          description: VM 안의 호스트 이름 (RFC 1123 이름 한 칸). Server가 정한다
+    VmPowerState:
+      type: string
+      enum: [running, stopped]
+      description: Proxmox가 보고하는 전원 상태
+    VmState:
+      type: object
+      required: [id, node, vmid, power, vcpu, memory_mb, ssd_gb, observed_at]
+      properties:
+        id:
+          type: string
+          description: VM 자원 id (= Proxmox VM 이름)
+        node:
+          type: string
+          description: VM이 있는 Proxmox 노드 이름
+        vmid:
+          type: integer
+          minimum: 100
+          description: Proxmox VM 번호
+        power:
+          $ref: '#/components/schemas/VmPowerState'
+        vcpu:
+          type: integer
+          minimum: 1
+        memory_mb:
+          type: integer
+          minimum: 1
+          description: 설정된 메모리 (MiB)
+        ssd_gb:
+          type: integer
+          minimum: 1
+          description: 루트 디스크 크기 (GiB)
+        observed_at:
+          type: string
+          format: date-time
+          description: 이 값을 Proxmox에서 받은 시각
     Protocol:
       type: string
       enum: [tcp, udp]
@@ -503,6 +752,12 @@ components:
             $ref: '#/components/schemas/InternalError'
     Conflict:
       description: 다른 것과 부딪혀 적용할 수 없다 (`ALREADY_EXISTS`, `VMID_TAKEN`, `PORT_TAKEN`, `INVALID_STATE`). `retryable`은 `false`다
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/InternalError'
+    Unprocessable:
+      description: 형식은 맞지만 실행할 수 없는 요청이다 (`IDEMPOTENCY_KEY_REUSED`). `retryable`은 `false`다
       content:
         application/json:
           schema:
