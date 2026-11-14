@@ -20,7 +20,7 @@ GSMSV v2 저장소들이 함께 쓰는 약속을 두는 곳이다.
 |---|---|
 | [GSMSV-Server-V2](https://github.com/GSMSV/GSMSV-Server-V2) | API 서버 (Kotlin) |
 | [GSMSV-Client-V2](https://github.com/GSMSV/GSMSV-Client-V2) | 웹 콘솔 (React) |
-| [GSMSV-Infra-V2](https://github.com/GSMSV/GSMSV-Infra-V2) | Proxmox·k3s를 다루는 실행 엔진 (Go) |
+| [GSMSV-Infra-V2](https://github.com/GSMSV/GSMSV-Infra-V2) | Proxmox·Kubernetes를 다루는 실행 엔진 (Go) |
 | [GSMSV-Contracts-V2](https://github.com/GSMSV/GSMSV-Contracts-V2) | 저장소끼리 함께 쓰는 약속 (API 명세, 자원 이름 규칙) |
 
 ## 참여하기
