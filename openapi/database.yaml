@@ -752,7 +752,7 @@ components:
           description: 원래 소유자가 없을 때(탈퇴·해체)만 다른 `user-…`·`team-…`. 이 경우 감사 로그에 원래 소유자와 함께 남긴다
     OperationRef:
       type: object
-      description: 공통 operation의 최소 표시 필드. 나머지 값은 operation 후속 명세에서 정한다
+      description: 공통 operation의 최소 표시 필드. 값의 뜻과 조회·SSE는 [operation 명세](./operation.yaml)가 정한다 (`status`는 `queued`·`running`·`succeeded`·`failed`·`canceled`)
       required: [id, type, status]
       properties:
         id: { type: string }
