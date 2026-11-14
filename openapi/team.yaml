@@ -3,7 +3,8 @@ info:
   title: GSMSV v2 Team API
   version: 0.1.0
   description: |
-    팀 만들기, 내 팀 목록, 팀 상세, 거절된 팀 다시 신청, 팀원 초대, 보낸 초대 목록, 초대 취소, 초대 수락 (Team 3.1~3.8).
+    팀 만들기, 내 팀 목록, 팀 상세, 거절된 팀 다시 신청, 팀원 초대, 보낸 초대 목록, 초대 취소, 초대 수락,
+    팀원 관리, 관리자 팀 관리, 팀 해체 (Team 3.1~3.14, Admin Team 11.5~11.8).
 
     - 규칙의 원본은 [21번 팀과 역할](../rules/team-ownership.md)과 [22번 권한 판단](../rules/authorization.md)이다
     - JSON 칸 이름은 snake_case, enum 값은 소문자다
@@ -33,6 +34,8 @@ tags:
     description: 팀 만들기·조회·다시 신청
   - name: Team Invitation
     description: 팀원 초대와 수락
+  - name: Admin Team
+    description: 관리자의 팀 승인·거절과 해체 승인
 paths:
   /api/v2/teams:
     post:
@@ -193,6 +196,282 @@ paths:
           $ref: './components/common.yaml#/components/responses/NotFound'
         '409':
           description: 거절 상태가 아니다 (`CONFLICT`)
+          content:
+            application/json:
+              schema:
+                $ref: './components/common.yaml#/components/schemas/ErrorResponse'
+  /api/v2/teams/{team_id}/members/{member_id}:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+      - $ref: '#/components/parameters/MemberId'
+    delete:
+      tags: [Team]
+      operationId: removeTeamMember
+      summary: 팀원 제외 (3.9)
+      description: |
+        팀장을 제외한 팀원을 팀에서 제외한다. 제외된 사람의 다음 요청부터 팀 자원 권한이 사라지며,
+        팀 VM·DB·함수·앱은 삭제하지 않는다.
+
+        권한: 팀장 또는 관리자 (동작 `remove_member`)
+      responses:
+        '204':
+          description: 제외했다
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '403':
+          $ref: './components/common.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+        '409':
+          description: 팀장을 제외하려 했다 (`CANNOT_REMOVE_LEADER`)
+          content:
+            application/json:
+              schema:
+                $ref: './components/common.yaml#/components/schemas/ErrorResponse'
+  /api/v2/teams/{team_id}/leave:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+    post:
+      tags: [Team]
+      operationId: leaveTeam
+      summary: 팀 탈퇴 (3.10)
+      description: |
+        로그인한 사용자가 팀에서 탈퇴한다. 팀장이 탈퇴하면 DevOps 중 한 명을,
+        없으면 남은 팀원 중 한 명을 무작위로 새 팀장으로 정한다. 팀 자원은 삭제하지 않는다.
+
+        권한: 본인 (동작 `leave_team`)
+      responses:
+        '204':
+          description: 탈퇴했다
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '403':
+          $ref: './components/common.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+        '409':
+          description: 마지막 팀원이라 탈퇴할 수 없다 (`LAST_TEAM_MEMBER`)
+          content:
+            application/json:
+              schema:
+                $ref: './components/common.yaml#/components/schemas/ErrorResponse'
+  /api/v2/teams/{team_id}/leader-transfer:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+    post:
+      tags: [Team]
+      operationId: transferTeamLeader
+      summary: 팀장 넘기기 (3.12)
+      description: |
+        지정한 팀원에게 팀장을 넘긴다. 기존 팀장은 일반 팀원이 되고 두 역할은 한 트랜잭션에서 바뀐다.
+        팀장 변경은 팀원 전원에게 알리고 감사 로그에 남긴다.
+
+        권한: 팀장 또는 관리자 (동작 `transfer_leader`)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LeaderTransferRequest'
+            example:
+              member_id: mbr-9k3m7q2p5wzh
+      responses:
+        '200':
+          description: 팀장을 넘겼다
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LeaderTransferResponse'
+              example:
+                leader_member_id: mbr-9k3m7q2p5wzh
+                my_role: member
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '403':
+          $ref: './components/common.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+  /api/v2/admin/teams:
+    get:
+      tags: [Admin Team]
+      operationId: listAdminTeams
+      summary: 관리자 팀 목록 (11.5)
+      description: |
+        관리자가 모든 팀을 상태로 걸러 조회한다. 최근에 만든 팀부터 준다.
+
+        권한: 관리자 (동작 `admin_team_read`)
+      security:
+        - accessToken: []
+      parameters:
+        - $ref: './components/common.yaml#/components/parameters/Cursor'
+        - $ref: './components/common.yaml#/components/parameters/Limit'
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/AdminTeamStatusFilter'
+      responses:
+        '200':
+          description: 관리자 팀 목록
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminTeamPage'
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '403':
+          $ref: './components/common.yaml#/components/responses/Forbidden'
+  /api/v2/admin/teams/{team_id}/approve:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+    post:
+      tags: [Admin Team]
+      operationId: approveTeam
+      summary: 팀 승인 (11.6)
+      description: |
+        승인 대기 팀을 승인한다. 승인되면 모든 팀에 공통 팀 VM 할당량이 적용된다.
+
+        권한: 관리자 (동작 `admin_team_approve`)
+      security:
+        - accessToken: []
+      responses:
+        '200':
+          description: 팀을 승인했다
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminTeamStatusResponse'
+              example:
+                id: team-4p8w2k9m1xza
+                status: approved
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '403':
+          $ref: './components/common.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+        '409':
+          description: 승인 대기 상태가 아니다 (`CONFLICT`)
+          content:
+            application/json:
+              schema:
+                $ref: './components/common.yaml#/components/schemas/ErrorResponse'
+  /api/v2/admin/teams/{team_id}/reject:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+    post:
+      tags: [Admin Team]
+      operationId: rejectTeam
+      summary: 팀 거절 (11.7)
+      description: |
+        팀을 지우지 않고 거절 상태로 남긴다. 팀장에게 사유를 알리고 수락 전 초대는 취소한다.
+
+        권한: 관리자 (동작 `admin_team_reject`)
+      security:
+        - accessToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RejectTeamRequest'
+            example:
+              reason: 팀 이름에 학교 행사명을 그대로 쓸 수 없습니다.
+      responses:
+        '200':
+          description: 팀을 거절했다
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RejectedTeamResponse'
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '403':
+          $ref: './components/common.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+        '409':
+          description: 승인 대기 상태가 아니다 (`CONFLICT`)
+          content:
+            application/json:
+              schema:
+                $ref: './components/common.yaml#/components/schemas/ErrorResponse'
+  /api/v2/teams/{team_id}/dissolution-request:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+    post:
+      tags: [Team]
+      operationId: requestTeamDissolution
+      summary: 팀 해체 요청 (3.14)
+      description: |
+        팀 해체를 관리자에게 요청한다. 승인 전에는 팀과 자원을 유지한다.
+        해체 승인 시 팀 VM·DB·함수·앱을 팀장 개인에게 넘기지 않고 모두 삭제한다.
+
+        권한: 팀장 또는 관리자 (동작 `disband_team`)
+      responses:
+        '202':
+          description: 해체 요청을 등록했다
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TeamDissolutionRequestResponse'
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '403':
+          $ref: './components/common.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+        '409':
+          description: 이미 해체 요청 중이다 (`CONFLICT`)
+          content:
+            application/json:
+              schema:
+                $ref: './components/common.yaml#/components/schemas/ErrorResponse'
+  /api/v2/admin/teams/{team_id}/dissolution/approve:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+    post:
+      tags: [Admin Team]
+      operationId: approveTeamDissolution
+      summary: 팀 해체 승인 (11.8)
+      description: |
+        해체 요청 중인 팀의 모든 팀 자원을 삭제하는 비동기 작업을 등록한다.
+        팀은 `dissolving` 상태가 되며 자원을 팀장 개인에게 이전하지 않는다.
+
+        권한: 관리자 (동작 `admin_team_dissolve`)
+      security:
+        - accessToken: []
+      responses:
+        '202':
+          description: 해체 작업을 등록했다
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TeamDissolutionAcceptedResponse'
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '403':
+          $ref: './components/common.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+        '409':
+          description: 해체 요청 중인 팀이 아니다 (`CONFLICT`)
           content:
             application/json:
               schema:
@@ -381,6 +660,15 @@ components:
         type: string
         pattern: '^inv-[0-9a-hjkmnp-tv-z]{12}$'
       example: inv-5r8t2y6w3kqm
+    MemberId:
+      name: member_id
+      in: path
+      required: true
+      description: 멤버십 id. 형식이 틀리면 400 `INVALID_RESOURCE_ID`
+      schema:
+        type: string
+        pattern: '^mbr-[0-9a-hjkmnp-tv-z]{12}$'
+      example: mbr-9k3m7q2p5wzh
   schemas:
     TeamName:
       type: string
@@ -389,10 +677,10 @@ components:
       description: 앞뒤 공백을 지운 뒤 1~30자. 다른 팀과 겹쳐도 된다
     TeamStatus:
       type: string
-      enum: [pending, approved, rejected]
+      enum: [pending, approved, rejected, dissolution_requested, dissolving]
       description: |
-        `pending` 관리자 승인 대기, `approved` 승인됨, `rejected` 거절됨.
-        해체 요청 중 상태는 해체 API를 명세할 때 더한다
+        `pending` 관리자 승인 대기, `approved` 승인됨, `rejected` 거절됨,
+        `dissolution_requested` 관리자 해체 승인 대기, `dissolving` 자원 삭제 중.
     TeamRole:
       type: string
       enum: [leader, devops, member]
@@ -460,6 +748,74 @@ components:
           $ref: '#/components/schemas/TeamRole'
         profile_image_url:
           type: [string, 'null']
+    AdminTeamStatusFilter:
+      type: string
+      enum: [pending, approved, rejected, dissolution_requested, dissolving]
+    AdminTeamSummary:
+      type: object
+      required: [id, name, status, leader, member_count, created_at]
+      properties:
+        id:
+          type: string
+          pattern: '^team-[0-9a-hjkmnp-tv-z]{12}$'
+        name:
+          $ref: '#/components/schemas/TeamName'
+        status:
+          $ref: '#/components/schemas/TeamStatus'
+        leader:
+          type: object
+          required: [name, email]
+          properties:
+            name:
+              type: string
+            email:
+              type: string
+              format: email
+        member_count:
+          type: integer
+          minimum: 1
+        created_at:
+          type: string
+          format: date-time
+    AdminTeamPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AdminTeamSummary'
+        next_cursor:
+          type: [string, 'null']
+    AdminTeamStatusResponse:
+      type: object
+      required: [id, status]
+      properties:
+        id:
+          type: string
+          pattern: '^team-[0-9a-hjkmnp-tv-z]{12}$'
+        status:
+          $ref: '#/components/schemas/TeamStatus'
+    RejectTeamRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          minLength: 1
+    RejectedTeamResponse:
+      type: object
+      required: [id, status, rejection_reason]
+      properties:
+        id:
+          type: string
+          pattern: '^team-[0-9a-hjkmnp-tv-z]{12}$'
+        status:
+          type: string
+          enum: [rejected]
+        rejection_reason:
+          type: string
     QuotaUsage:
       type: object
       required: [used, limit]
@@ -542,6 +898,63 @@ components:
         name:
           $ref: '#/components/schemas/TeamName'
           description: 고친 팀 이름. 없으면 그대로 둔다
+    LeaderTransferRequest:
+      type: object
+      additionalProperties: false
+      required: [member_id]
+      properties:
+        member_id:
+          type: string
+          pattern: '^mbr-[0-9a-hjkmnp-tv-z]{12}$'
+    LeaderTransferResponse:
+      type: object
+      required: [leader_member_id, my_role]
+      properties:
+        leader_member_id:
+          type: string
+          pattern: '^mbr-[0-9a-hjkmnp-tv-z]{12}$'
+        my_role:
+          $ref: '#/components/schemas/TeamRole'
+    TeamDissolutionRequestResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [dissolution_requested]
+    TeamDissolutionAcceptedResponse:
+      type: object
+      required: [operation, resource]
+      properties:
+        operation:
+          type: object
+          required: [id, type, status, stage, created_at]
+          properties:
+            id:
+              type: string
+              pattern: '^op-[0-9a-hjkmnp-tv-z]{12}$'
+            type:
+              type: string
+              enum: [team.dissolve]
+            status:
+              type: string
+              enum: [queued, running, succeeded, failed, canceled]
+            stage:
+              type: string
+              enum: [queued, running]
+            created_at:
+              type: string
+              format: date-time
+        resource:
+          type: object
+          required: [id, status]
+          properties:
+            id:
+              type: string
+              pattern: '^team-[0-9a-hjkmnp-tv-z]{12}$'
+            status:
+              type: string
+              enum: [dissolving]
     ResubmitTeamResponse:
       type: object
       required: [id, status]
