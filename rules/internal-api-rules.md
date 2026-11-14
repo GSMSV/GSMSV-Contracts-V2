@@ -223,6 +223,6 @@ Kotlin·Go 경계 문서는 **누가 무엇을 하는가**를 정한다. 이 문
 | 서비스 사이 인증의 방식과 자격증명 | 비공개 문서 (백엔드·Go 담당) |
 | VM 엔드포인트 (만들기·지우기·전원·사양·스냅샷·노드 여유·지표·실제 상태 조회) | Go VM 엔진 구현 전 명세 PR |
 | 노드별 VM 목록, 노드 실사용량 | 해당 기능 구현 전 명세 PR |
-| VM 방화벽의 기본 정책(어느 규칙에도 걸리지 않은 트래픽을 받을지·막을지)과 `direction: out` 규칙에서 `internal_ip`를 쓰는 자리 | Go 방화벽 구현 전 Server·Go 담당 (명세 `PUT /network/vms/{vm_id}/firewall`) |
+| 웹 API 방화벽 규칙의 기본 `action`(`accept`)과 허용 목록 안내. 기본 정책이 `ACCEPT`라 `accept`만으로는 효과가 없다 | Server·웹 담당 (명세 `PUT /network/vms/{vm_id}/firewall`) |
 | Kubernetes 테넌트, 원터치 배포·서버리스의 Server → Infra 호출 | 서비스 실행 환경을 정한 뒤 명세 PR |
 | 조정 간격 값 (7장) | 운영하며 정하는 설정값 |
