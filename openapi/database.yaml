@@ -545,7 +545,7 @@ components:
           schema:
             $ref: '#/components/schemas/DatabaseOperationResponse'
           example:
-            operation: { id: op-4p8w2k9m1xza, type: db.create, status: running }
+            operation: { id: op-4p8w2k9m1xza, type: db.create, status: queued, stage: queued }
             resource: { grn: 'grn:team-4p8w2k9m1xza:db-k3m9x2p7q4ta', status: creating }
     Unprocessable:
       description: 개수 한도 초과(`QUOTA_EXCEEDED`, `details`에 한도와 쓰는 개수) 또는 쓰기 금지 소유자(`WRITE_LOCKED_OWNER`)
@@ -751,13 +751,7 @@ components:
           type: string
           description: 원래 소유자가 없을 때(탈퇴·해체)만 다른 `user-…`·`team-…`. 이 경우 감사 로그에 원래 소유자와 함께 남긴다
     OperationRef:
-      type: object
-      description: 공통 operation의 최소 표시 필드. 나머지 값은 operation 후속 명세에서 정한다
-      required: [id, type, status]
-      properties:
-        id: { type: string }
-        type: { type: string }
-        status: { type: string }
+      $ref: './operation.yaml#/components/schemas/OperationRef'
     DatabaseOperationResponse:
       type: object
       required: [operation, resource]

@@ -66,6 +66,15 @@
 - API 경로에서는 팀 id와 함께 쓴다 (예: `/api/v2/teams/{team_id}/invitations/{invitation_id}`). 서버는 그 기록이 경로의 팀에 속하는지 확인하고, 아니면 404로 거절한다
 - 초대 링크에는 이 id가 아니라 별도 비밀 토큰을 쓴다 ([23번](../rules/resource-naming.md))
 
+### 작업 기록 (GRN이 없고 자기 id만 가진다)
+
+| 접두사 | 대상 | 예 |
+|---|---|---|
+| `op` | 오래 걸리는 작업 (operation) | `op-7w8k9q0p1a2s` |
+
+- 자원이 아니라 자원에 대한 작업 기록이다. 권한은 대상 자원으로 판단한다 ([Operation API](../openapi/operation.yaml))
+- Infra의 `job-`·`boot-`는 Infra가 정하는 값이라 이 표에 넣지 않는다 ([내부 API 공통 규약 2장](../rules/internal-api-rules.md))
+
 ### 하위 자원 (부모 GRN과 함께 쓴다)
 
 | 접두사 | 하위 자원 | 부모 | 예 |
@@ -115,6 +124,7 @@
 | 팀 id | `^team-[0-9a-hjkmnp-tv-z]{12}$` |
 | 멤버 id | `^mbr-[0-9a-hjkmnp-tv-z]{12}$` |
 | 초대 id | `^inv-[0-9a-hjkmnp-tv-z]{12}$` |
+| operation id | `^op-[0-9a-hjkmnp-tv-z]{12}$` |
 | 하위 자원 id | `^(snap|port|domain|fwrule|trigger|version|backup|service|env|deployment)-[0-9a-hjkmnp-tv-z]{8}$` |
 
 - 하위 자원 표기는 한 단계만 받는다. 하위 id 뒤에 `/`가 더 오면 틀린 표기다
