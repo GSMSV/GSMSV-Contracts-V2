@@ -1,0 +1,104 @@
+openapi: 3.1.0
+info:
+  title: GSMSV v2 VM API
+  version: 0.1.0
+  description: |
+    VM(Instance) API. 지금은 고를 수 있는 운영체제 목록(4.1)만 있다. VM 생성·조회 등은 다음 PR에서 이 파일에 더한다.
+
+    - 규칙의 원본은 [27번 사용량 할당량 5장](../policies/quota.md), [31번 인스턴스 이미지 종류 늘리기](../policies/feature-policies.md)다
+    - JSON 칸 이름은 snake_case다
+    - 오류 본문은 공통 형식 `{ code, message, request_id, details? }`다
+servers:
+  - url: https://{host}
+    variables:
+      host:
+        default: example.com
+security:
+  - accessToken: []
+tags:
+  - name: VM Image
+    description: VM을 만들 때 고를 수 있는 운영체제
+paths:
+  /api/v2/vm-images:
+    get:
+      tags: [VM Image]
+      operationId: listVmImages
+      summary: 고를 수 있는 운영체제 목록 (4.1)
+      description: |
+        VM을 만들 때 고를 수 있는 운영체제와 운영체제마다의 최소 사양을 준다.
+        생성 화면은 운영체제 선택지와 슬라이더 최소값을 이 값으로 정한다.
+
+        - 목록은 배포 없이 바꿀 수 있는 서버 설정값이다. 운영체제를 늘리면(31번) 템플릿을 모든 노드에 올린 뒤 설정에 더한다
+        - 순서는 화면에 보여 줄 순서다
+        - 목록이 몇 개뿐이라 페이지를 나누지 않는다
+        - VM 생성(개인·팀)은 같은 설정으로 `image`와 최소 사양을 검사한다
+        - Proxmox 템플릿 번호 같은 가상화 서버 값은 주지 않는다
+
+        권한: 로그인한 사용자. 자원이 없는 조회라 자원 로더와 동작 이름이 없다
+      responses:
+        '200':
+          description: 운영체제 목록
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/VmImage'
+              example:
+                items:
+                  - id: ubuntu-24.04
+                    name: Ubuntu 24.04 LTS
+                    min: { vcpu: 1, ram_gb: 1, ssd_gb: 4 }
+                  - id: ubuntu-22.04
+                    name: Ubuntu 22.04 LTS
+                    min: { vcpu: 1, ram_gb: 1, ssd_gb: 4 }
+                  - id: debian-13
+                    name: Debian 13
+                    min: { vcpu: 1, ram_gb: 1, ssd_gb: 4 }
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+components:
+  securitySchemes:
+    accessToken:
+      $ref: './components/common.yaml#/components/securitySchemes/accessToken'
+  schemas:
+    VmImage:
+      type: object
+      required: [id, name, min]
+      properties:
+        id:
+          type: string
+          pattern: '^[a-z0-9]+([.-][a-z0-9]+)*$'
+          maxLength: 64
+          description: |
+            운영체제 이미지 id. `{배포판}-{버전}` 소문자다 (예 `ubuntu-24.04`, `debian-13`).
+            VM 생성 요청의 `image`에 이 값을 넣는다. Server는 이 값을 내부 API(VM 만들기)의 `image`로 그대로 넘긴다
+        name:
+          type: string
+          description: 화면에 보여 줄 이름
+        min:
+          $ref: '#/components/schemas/VmImageMin'
+    VmImageMin:
+      type: object
+      description: |
+        이 운영체제로 VM을 만들 때의 최소 사양. 규칙의 원본은 [27번 5장](../policies/quota.md)이다.
+
+        - `vcpu`는 1이다
+        - `ram_gb`·`ssd_gb`는 운영체제 공식 최소 기준(클라우드 이미지 값이 있으면 그 값)을 1 GiB 단위로 올림한 값이다. 칸 이름은 `_gb`지만 값은 GiB다
+        - `ssd_gb`는 운영체제 최소 저장 공간과 템플릿 디스크 크기 중 큰 값이다. Proxmox는 디스크를 줄일 수 없기 때문이다
+        - 이 값이 `max_creatable`([Quota API](./quota.yaml))보다 크면 그 운영체제로는 VM을 만들 수 없다
+      required: [vcpu, ram_gb, ssd_gb]
+      properties:
+        vcpu:
+          type: integer
+          minimum: 1
+        ram_gb:
+          type: integer
+          minimum: 1
+        ssd_gb:
+          type: integer
+          minimum: 1
