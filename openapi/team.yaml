@@ -4,7 +4,7 @@ info:
   version: 0.1.0
   description: |
     팀 만들기, 내 팀 목록, 팀 상세, 거절된 팀 다시 신청, 팀원 초대, 보낸 초대 목록, 초대 취소, 초대 수락,
-    팀원 관리, 관리자 팀 관리, 팀 해체 (Team 3.1~3.14, Admin Team 11.5~11.8).
+    팀원 관리, 관리자 팀 관리, 팀 해체, 팀 서비스 사용량 (Team 3.1~3.15, Admin Team 11.5~11.8).
 
     - 규칙의 원본은 [21번 팀과 역할](../rules/team-ownership.md)과 [22번 권한 판단](../rules/authorization.md)이다
     - JSON 칸 이름은 snake_case, enum 값은 소문자다
@@ -157,6 +157,55 @@ paths:
           $ref: './components/common.yaml#/components/responses/Unauthenticated'
         '404':
           $ref: './components/common.yaml#/components/responses/NotFound'
+  /api/v2/teams/{team_id}/usage:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+    get:
+      tags: [Team]
+      operationId: getTeamUsage
+      summary: 팀 서비스 사용량 (3.15)
+      description: |
+        팀의 서비스별 사용량과 한도를 한 번에 준다. 팀 상세(3.3)는 VM 할당량만 주므로,
+        팀 DB 개수·전용형 개수·공유형 DB 용량·쓰기 금지와 팀 앱 개수·메모리·상시 실행 칸은 이 API로 받는다.
+        서비스 사용량은 VM 한도에서 빼지 않고 따로 센다 ([27번 4.9](../policies/quota.md)).
+
+        `updated_at`은 주기적으로 측정하는 사용량의 기준 시각이다. 서버리스 함수 사용량은 2차 범위로,
+        이 응답에는 넣지 않는다.
+
+        권한: 팀원 전원, 관리자 (동작 `team.read`)
+      responses:
+        '200':
+          description: 팀 서비스 사용량
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TeamUsage'
+              example:
+                team_id: team-4p8w2k9m1xza
+                vm:
+                  vcpu: { used: 4, limit: 8 }
+                  ram_gb: { used: 8, limit: 16 }
+                  ssd_gb: { used: 40, limit: 60 }
+                db:
+                  count: { used: 2, limit: 4 }
+                  dedicated: { used: 0, limit: 1 }
+                  storage_gb: { used: 0.7, limit: 2 }
+                  write_locked: false
+                app:
+                  count: { used: 1, limit: 4 }
+                  memory_mb: { used: 1024, limit: 4096 }
+                  always_on: { used: 0, limit: 2 }
+                updated_at: '2026-10-30T09:00:00Z'
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '404':
+          description: 팀이 없거나 요청자가 팀원이 아니다 (`NOT_FOUND`)
+          content:
+            application/json:
+              schema:
+                $ref: './components/common.yaml#/components/schemas/ErrorResponse'
   /api/v2/teams/{team_id}/resubmit:
     parameters:
       - $ref: '#/components/parameters/TeamId'
@@ -891,6 +940,70 @@ components:
             - type: 'null'
         permissions:
           $ref: '#/components/schemas/TeamPermissions'
+    TeamUsageAmount:
+      type: object
+      required: [used, limit]
+      properties:
+        used:
+          type: integer
+          minimum: 0
+        limit:
+          type: integer
+          minimum: 0
+    TeamStorageUsage:
+      type: object
+      required: [used, limit]
+      properties:
+        used:
+          type: number
+          minimum: 0
+        limit:
+          type: number
+          minimum: 0
+    TeamUsage:
+      type: object
+      required: [team_id, vm, db, app, updated_at]
+      properties:
+        team_id:
+          type: string
+          pattern: '^team-[0-9a-hjkmnp-tv-z]{12}$'
+        vm:
+          type: object
+          required: [vcpu, ram_gb, ssd_gb]
+          properties:
+            vcpu:
+              $ref: '#/components/schemas/TeamUsageAmount'
+            ram_gb:
+              $ref: '#/components/schemas/TeamUsageAmount'
+            ssd_gb:
+              $ref: '#/components/schemas/TeamUsageAmount'
+        db:
+          type: object
+          required: [count, dedicated, storage_gb, write_locked]
+          properties:
+            count:
+              $ref: '#/components/schemas/TeamUsageAmount'
+            dedicated:
+              $ref: '#/components/schemas/TeamUsageAmount'
+            storage_gb:
+              $ref: '#/components/schemas/TeamStorageUsage'
+            write_locked:
+              type: boolean
+              description: 팀 공유형 DB 용량 합계가 한도를 넘어 쓰기 금지 상태인지
+        app:
+          type: object
+          required: [count, memory_mb, always_on]
+          properties:
+            count:
+              $ref: '#/components/schemas/TeamUsageAmount'
+            memory_mb:
+              $ref: '#/components/schemas/TeamUsageAmount'
+            always_on:
+              $ref: '#/components/schemas/TeamUsageAmount'
+        updated_at:
+          type: string
+          format: date-time
+          description: 사용량을 마지막으로 측정한 시각
     ResubmitTeamRequest:
       type: object
       additionalProperties: false
