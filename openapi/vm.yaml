@@ -3,11 +3,12 @@ info:
   title: GSMSV v2 VM API
   version: 0.1.0
   description: |
-    VM(Instance) API. 지금은 고를 수 있는 운영체제 목록(4.1)만 있다. VM 생성·조회 등은 다음 PR에서 이 파일에 더한다.
+    VM(Instance) API. 지금은 고를 수 있는 운영체제 목록(4.1)과 VM 목록·상세(4.5·4.6)가 있다. VM 생성·전원·삭제 등은 다음 PR에서 이 파일에 더한다.
 
-    - 규칙의 원본은 [27번 사용량 할당량 5장](../policies/quota.md), [31번 인스턴스 이미지 종류 늘리기](../policies/feature-policies.md)다
-    - JSON 칸 이름은 snake_case다
+    - 규칙의 원본은 [22번 권한 판단](../rules/authorization.md), [23번 자원 이름 규칙](../rules/resource-naming.md), [27번 사용량 할당량 5장](../policies/quota.md), [31번 인스턴스 이미지 종류 늘리기](../policies/feature-policies.md)다
+    - JSON 칸 이름은 snake_case, enum 값은 소문자다
     - 오류 본문은 공통 형식 `{ code, message, request_id, details? }`다
+    - `permissions` 키는 지금 서버의 동작 이름 소문자(`delete`, `power`, `port_forward` 등)를 쓴다 ([API 규칙 3장](../rules/api-rules.md))
 servers:
   - url: https://{host}
     variables:
@@ -18,7 +19,165 @@ security:
 tags:
   - name: VM Image
     description: VM을 만들 때 고를 수 있는 운영체제
+  - name: VM
+    description: VM 조회
 paths:
+  /api/v2/vms:
+    get:
+      tags: [VM]
+      operationId: listVms
+      summary: VM 목록 (4.5)
+      description: |
+        내가 볼 수 있는 VM 목록을 준다. 볼 수 없는 VM은 나오지 않는다. 최신 생성 순(`created_at` 내림차순, 같으면 `id` 내림차순)이다.
+        삭제된 VM은 나오지 않는다.
+
+        - 전원·사용률(`power_state`, `usage`)은 DB에 저장하지 않는 실시간 값이다. Server는 가상화 서버에서 받은 값을 짧게(10초) 캐시해 덧붙이므로 조금 늦을 수 있다
+        - 한 VM의 실시간 값을 받지 못하면 목록 전체를 실패시키지 않는다. 그 VM만 `power_state: unknown`, `usage: null`이다
+        - 목록의 `permissions`는 목록 화면 버튼에 필요한 동작(`delete`, `power`, `extend`)만 담는다. 나머지는 상세(4.6)에서 받는다
+
+        권한: 로그인한 사용자 (개인 본인 / 팀 팀원 전원). 관리자는 `owner`를 빼면 모든 VM을 본다
+      parameters:
+        - name: owner
+          in: query
+          required: false
+          description: |
+            `me`(내 개인 VM) 또는 `team-…`(그 팀의 VM). 없으면 볼 수 있는 VM 전부.
+            팀 id 형식이 틀리면 400 `INVALID_RESOURCE_ID`, 볼 수 없는 팀이면 빈 목록이 아니라 404다
+          schema:
+            type: string
+            examples: [me, team-4p8w2k9m1xza]
+        - $ref: './components/common.yaml#/components/parameters/Cursor'
+        - $ref: './components/common.yaml#/components/parameters/Limit'
+      responses:
+        '200':
+          description: VM 목록
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VmSummaryPage'
+              example:
+                items:
+                  - grn: 'grn:team-4p8w2k9m1xza:vm-k3m9x2p7q4ta'
+                    id: vm-k3m9x2p7q4ta
+                    name: 주문 서비스 서버
+                    owner: { type: team, id: team-4p8w2k9m1xza, name: 주문팀 }
+                    status: active
+                    power_state: running
+                    image: ubuntu-24.04
+                    spec: { vcpu: 2, ram_gb: 4, ssd_gb: 40 }
+                    usage: { cpu_percent: 12.5, memory_percent: 41.2, uptime_sec: 86400 }
+                    internal_ip: 192.0.2.10
+                    purpose: 주문 API 운영
+                    created_at: '2026-11-01T09:00:00Z'
+                    expires_at: '2026-12-02T09:00:00Z'
+                    permissions: { delete: true, power: true, extend: true }
+                  - grn: 'grn:user-7m2k9p4x8qza:vm-9t4r2m7k3pza'
+                    id: vm-9t4r2m7k3pza
+                    name: 연습용
+                    owner: { type: user, id: user-7m2k9p4x8qza, name: 홍길동 }
+                    status: active
+                    power_state: unknown
+                    image: debian-13
+                    spec: { vcpu: 1, ram_gb: 1, ssd_gb: 10 }
+                    usage: null
+                    internal_ip: 192.0.2.11
+                    purpose: null
+                    created_at: '2026-10-28T09:00:00Z'
+                    expires_at: '2026-11-25T09:00:00Z'
+                    permissions: { delete: true, power: true, extend: true }
+                next_cursor: null
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+  /api/v2/vms/{vm_grn}:
+    parameters:
+      - $ref: './network.yaml#/components/parameters/VmGrn'
+    get:
+      tags: [VM]
+      operationId: getVm
+      summary: VM 상세 (4.6)
+      description: |
+        VM 하나의 정보와 하위 자원 목록(스냅샷·포트포워딩·HTTPS 도메인·방화벽 규칙)을 한 번에 준다.
+        하위 자원만 따로 받는 목록 API는 [Network API](./network.yaml)에 있다.
+
+        - 실시간 값을 받지 못하면 상세 전체를 실패시키지 않는다. `power_state: unknown`, `usage: null`로 준다
+        - 하위 자원 목록은 DB 값이다. 그 기능이 아직 없으면 빈 배열이다
+        - `ssh`는 저장된 SSH 포트포워딩(`kind: ssh`)으로 만든다. 그 규칙이 없으면 `null`이다
+        - `permissions`는 VM에 할 수 있는 동작 전부를 담는다
+
+        권한: 개인 VM은 본인, 팀 VM은 팀원 전원, 관리자.
+        GRN 형식·종류 오류는 400, 없거나 볼 수 없거나 요청 GRN의 소유자 칸이 DB 소유자와 다르면 404다
+      responses:
+        '200':
+          description: VM 상세
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VmDetail'
+              example:
+                grn: 'grn:team-4p8w2k9m1xza:vm-k3m9x2p7q4ta'
+                id: vm-k3m9x2p7q4ta
+                name: 주문 서비스 서버
+                owner: { type: team, id: team-4p8w2k9m1xza, name: 주문팀 }
+                status: active
+                power_state: running
+                image: ubuntu-24.04
+                spec: { vcpu: 2, ram_gb: 4, ssd_gb: 40 }
+                usage: { cpu_percent: 12.5, memory_percent: 41.2, uptime_sec: 86400 }
+                internal_ip: 192.0.2.10
+                purpose: 주문 API 운영
+                initialized: true
+                ssh:
+                  user: ubuntu
+                  host: vm.example.com
+                  port: 20022
+                  command: ssh ubuntu@vm.example.com -p 20022
+                auto_snapshot: false
+                snapshots:
+                  - id: snap-7qz3m8k2
+                    name: 배포 전
+                    type: manual
+                    created_at: '2026-11-10T09:00:00Z'
+                port_forwards:
+                  - id: port-5q8w3n7z
+                    kind: ssh
+                    external_port: 20022
+                    internal_port: 22
+                    protocol: tcp
+                    allowed_source: null
+                    description: null
+                domains:
+                  - id: domain-4k8m2q9t
+                    subdomain: order-api
+                    url: https://order-api.example.com
+                    internal_port: 8080
+                    sync_status: synced
+                firewall_rules: []
+                created_by: 홍길동
+                created_at: '2026-11-01T09:00:00Z'
+                updated_at: '2026-11-10T09:00:00Z'
+                expires_at: '2026-12-02T09:00:00Z'
+                permissions:
+                  view: true
+                  view_access_info: true
+                  update: true
+                  delete: true
+                  power: true
+                  resize: true
+                  snapshot: true
+                  port_forward: true
+                  firewall: true
+                  domain: true
+                  extend: true
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
   /api/v2/vm-images:
     get:
       tags: [VM Image]
@@ -102,3 +261,200 @@ components:
         ssd_gb:
           type: integer
           minimum: 1
+    VmStatus:
+      type: string
+      enum: [creating, active, suspended, deleting, failed]
+      description: |
+        DB에 저장한 VM 수명 상태. 전원 상태는 `power_state`로 따로 준다.
+
+        - `creating`: 만드는 중 (operation이 끝나면 `active` 또는 `failed`)
+        - `active`: 사용 중
+        - `suspended`: 만료로 멈춤. 연장하면 `active`로 돌아간다
+        - `deleting`: 삭제 중
+        - `failed`: 만들기 실패. 삭제만 할 수 있다
+
+        만료·정지 상태 이름은 자원 수명 공통 처리와 함께 다시 볼 수 있다
+    VmPowerState:
+      type: string
+      enum: [running, stopped, unknown]
+      description: |
+        가상화 서버가 보고한 전원 상태 (실시간 값, 최대 10초 캐시).
+        가상화 서버에서 값을 받지 못했거나 아직 가상화 서버에 VM이 없으면(`creating`·`failed`) `unknown`이다
+    VmSpec:
+      type: object
+      description: 사양. 칸 이름은 `_gb`지만 값은 GiB다 ([27번 5장](../policies/quota.md))
+      required: [vcpu, ram_gb, ssd_gb]
+      properties:
+        vcpu: { type: integer, minimum: 1 }
+        ram_gb: { type: integer, minimum: 1 }
+        ssd_gb: { type: integer, minimum: 1 }
+    VmUsage:
+      type: [object, 'null']
+      description: 실시간 사용률. `power_state`가 `unknown`이면 `null`이다
+      required: [cpu_percent, memory_percent, uptime_sec]
+      properties:
+        cpu_percent: { type: number, minimum: 0, maximum: 100 }
+        memory_percent: { type: number, minimum: 0, maximum: 100 }
+        uptime_sec:
+          type: integer
+          minimum: 0
+          description: 마지막으로 켜진 뒤 지난 시간(초). 꺼져 있으면 0이다
+    VmOwner:
+      type: object
+      required: [type, id, name]
+      properties:
+        type: { type: string, enum: [user, team] }
+        id:
+          type: string
+          description: 접두사를 포함한 사용자·팀 id
+        name: { type: string }
+    VmListPermissions:
+      type: object
+      description: 목록 화면 버튼에 필요한 동작만 담는다. 프론트는 버튼을 숨기는 데만 쓴다
+      required: [delete, power, extend]
+      properties:
+        delete: { type: boolean }
+        power: { type: boolean }
+        extend: { type: boolean }
+    VmPermissions:
+      type: object
+      description: |
+        요청자가 이 VM에 할 수 있는 동작 전부. 프론트는 버튼을 숨기는 데만 쓴다.
+        팀 VM의 조회·접속 정보·연장은 팀원 전원, 나머지는 팀장·DevOps다 ([21번](../rules/team-ownership.md))
+      required: [view, view_access_info, update, delete, power, resize, snapshot, port_forward, firewall, domain, extend]
+      properties:
+        view: { type: boolean }
+        view_access_info: { type: boolean }
+        update: { type: boolean }
+        delete: { type: boolean }
+        power: { type: boolean }
+        resize: { type: boolean }
+        snapshot:
+          type: boolean
+          description: 스냅샷 만들기·지우기·복원과 자동 스냅샷 켜기·끄기
+        port_forward: { type: boolean }
+        firewall: { type: boolean }
+        domain: { type: boolean }
+        extend: { type: boolean }
+    VmSummary:
+      type: object
+      required: [grn, id, name, owner, status, power_state, image, spec, usage, internal_ip, purpose, created_at, expires_at, permissions]
+      properties:
+        grn:
+          type: string
+          pattern: '^grn:(user|team)-[0-9a-hjkmnp-tv-z]{12}:vm-[0-9a-hjkmnp-tv-z]{12}$'
+        id:
+          type: string
+          pattern: '^vm-[0-9a-hjkmnp-tv-z]{12}$'
+        name: { type: string }
+        owner: { $ref: '#/components/schemas/VmOwner' }
+        status: { $ref: '#/components/schemas/VmStatus' }
+        power_state: { $ref: '#/components/schemas/VmPowerState' }
+        image:
+          type: string
+          description: 운영체제 이미지 id (`VmImage`의 `id`)
+        spec: { $ref: '#/components/schemas/VmSpec' }
+        usage: { $ref: '#/components/schemas/VmUsage' }
+        internal_ip:
+          type: [string, 'null']
+          description: 내부망 IP. 아직 받지 않았으면(`creating`·`failed`) `null`이다
+        purpose:
+          type: [string, 'null']
+          description: 만들 때 적은 사용 목적
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        permissions: { $ref: '#/components/schemas/VmListPermissions' }
+    VmSummaryPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/VmSummary'
+        next_cursor:
+          type: [string, 'null']
+          description: 마지막 페이지면 `null`
+    VmSsh:
+      type: [object, 'null']
+      description: |
+        SSH 접속 정보. 저장된 SSH 포트포워딩(`kind: ssh`)의 외부 포트로 만든다 (계산식으로 만들지 않는다).
+        그 규칙을 지웠으면 `null`이다. 비밀번호는 넣지 않는다
+      required: [user, host, port, command]
+      properties:
+        user:
+          type: string
+          description: 만들 때 정한 초기 사용자 이름
+        host:
+          type: string
+          description: 외부에서 접속하는 주소. 노드를 드러내지 않는 값이다 (포트포워딩 목록의 `public_host`와 같다)
+        port:
+          type: integer
+          description: SSH 포트포워딩의 외부 포트
+        command:
+          type: string
+          description: 그대로 복사해 쓰는 접속 명령 (`ssh {user}@{host} -p {port}`)
+    VmSnapshot:
+      type: object
+      description: 스냅샷 하나. 스냅샷 API 명세 때 칸을 더할 수 있다
+      required: [id, name, type, created_at]
+      properties:
+        id:
+          type: string
+          pattern: '^snap-[0-9a-hjkmnp-tv-z]{8}$'
+        name: { type: string }
+        type:
+          type: string
+          enum: [manual, auto]
+          description: 직접 만든 것(`manual`)과 자동 스냅샷(`auto`)
+        created_at: { type: string, format: date-time }
+    VmDetail:
+      type: object
+      required: [grn, id, name, owner, status, power_state, image, spec, usage, internal_ip, purpose, initialized, ssh, auto_snapshot, snapshots, port_forwards, domains, firewall_rules, created_by, created_at, updated_at, expires_at, permissions]
+      properties:
+        grn:
+          type: string
+          pattern: '^grn:(user|team)-[0-9a-hjkmnp-tv-z]{12}:vm-[0-9a-hjkmnp-tv-z]{12}$'
+        id:
+          type: string
+          pattern: '^vm-[0-9a-hjkmnp-tv-z]{12}$'
+        name: { type: string }
+        owner: { $ref: '#/components/schemas/VmOwner' }
+        status: { $ref: '#/components/schemas/VmStatus' }
+        power_state: { $ref: '#/components/schemas/VmPowerState' }
+        image: { type: string }
+        spec: { $ref: '#/components/schemas/VmSpec' }
+        usage: { $ref: '#/components/schemas/VmUsage' }
+        internal_ip: { type: [string, 'null'] }
+        purpose: { type: [string, 'null'] }
+        initialized:
+          type: boolean
+          description: 가상화 서버가 보고한 cloud-init 완료 여부를 저장한 값
+        ssh: { $ref: '#/components/schemas/VmSsh' }
+        auto_snapshot:
+          type: boolean
+          description: 자동 스냅샷 켜짐 여부 (VM 설정값, [9번](../policies/feature-policies.md))
+        snapshots:
+          type: array
+          items:
+            $ref: '#/components/schemas/VmSnapshot'
+        port_forwards:
+          type: array
+          items:
+            $ref: './network.yaml#/components/schemas/PortForward'
+        domains:
+          type: array
+          items:
+            $ref: './network.yaml#/components/schemas/Domain'
+        firewall_rules:
+          type: array
+          description: 이 VM의 방화벽 규칙 전부 (VM당 개수 한도가 있어 나누지 않는다)
+          items:
+            $ref: './network.yaml#/components/schemas/FirewallRule'
+        created_by:
+          type: string
+          description: 만든 사람의 표시 이름. 사용자 id는 주지 않는다
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        permissions: { $ref: '#/components/schemas/VmPermissions' }
