@@ -195,7 +195,7 @@ paths:
                   count: { used: 1, limit: 4 }
                   memory_mb: { used: 1024, limit: 4096 }
                   always_on: { used: 0, limit: 2 }
-                updated_at: '2026-10-30T09:00:00Z'
+                updated_at: null
         '400':
           $ref: './components/common.yaml#/components/responses/BadRequest'
         '401':
@@ -1001,9 +1001,9 @@ components:
             always_on:
               $ref: '#/components/schemas/TeamUsageAmount'
         updated_at:
-          type: string
+          type: [string, 'null']
           format: date-time
-          description: 사용량을 마지막으로 측정한 시각
+          description: 실제 측정된 사용량의 기준 시각. 아직 측정 결과가 없으면 null
     ResubmitTeamRequest:
       type: object
       additionalProperties: false
