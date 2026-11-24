@@ -3,7 +3,7 @@ info:
   title: GSMSV v2 VM API
   version: 0.1.0
   description: |
-    VM(Instance) API. 지금은 고를 수 있는 운영체제 목록(4.1)과 VM 목록·상세(4.5·4.6)가 있다. VM 생성·전원·삭제 등은 다음 PR에서 이 파일에 더한다.
+    VM(Instance) API. 지금은 고를 수 있는 운영체제 목록(4.1), VM 목록·상세(4.5·4.6), VM 사용량 그래프(4.8)가 있다. VM 생성·전원·삭제 등은 다음 PR에서 이 파일에 더한다.
 
     - 규칙의 원본은 [22번 권한 판단](../rules/authorization.md), [23번 자원 이름 규칙](../rules/resource-naming.md), [27번 사용량 할당량 5장](../policies/quota.md), [31번 인스턴스 이미지 종류 늘리기](../policies/feature-policies.md)다
     - JSON 칸 이름은 snake_case, enum 값은 소문자다
@@ -20,7 +20,7 @@ tags:
   - name: VM Image
     description: VM을 만들 때 고를 수 있는 운영체제
   - name: VM
-    description: VM 조회
+    description: VM 조회와 사용량
 paths:
   /api/v2/vms:
     get:
@@ -178,6 +178,75 @@ paths:
           $ref: './components/common.yaml#/components/responses/Unauthenticated'
         '404':
           $ref: './components/common.yaml#/components/responses/NotFound'
+  /api/v2/vms/{vm_grn}/metrics:
+    parameters:
+      - $ref: './network.yaml#/components/parameters/VmGrn'
+    get:
+      tags: [VM]
+      operationId: getVmMetrics
+      summary: VM 사용량 그래프 (4.8)
+      description: |
+        VM의 CPU·메모리·네트워크·디스크 I/O 시계열을 준다. 값은 가상화 서버가 기록한 것을 Server가 칸 이름과 단위만 바꿔 그대로 넘긴다.
+
+        - `period=hour`는 최근 1시간, `day`는 최근 24시간이다. 점 간격은 가상화 서버가 정한다 (지금은 `hour` 1분, `day` 30분)
+        - 점은 오래된 것부터(`at` 오름차순) 준다. 값은 그 구간의 평균이다
+        - 정지된 VM도 기록이 있으면 준다. VM이 꺼져 있던 구간처럼 측정값이 없는 점은 그 칸이 `null`이다 (0으로 채우지 않는다)
+        - 가상화 서버에 아직 VM이 없으면(`creating`·`failed`) 오류가 아니라 빈 `points`다
+        - 메모리 사용률(%)은 이 응답에 없다. 상세(4.6)의 `spec.ram_gb`로 계산한다
+        - 목록·상세와 달리 응답 전체가 가상화 서버 값이라, 받지 못하면 503 `UPSTREAM_UNAVAILABLE`이다
+
+        권한: 개인 VM은 본인, 팀 VM은 팀원 전원, 관리자 (동작 `view`).
+        GRN 형식·종류 오류는 400, 없거나 볼 수 없거나 요청 GRN의 소유자 칸이 DB 소유자와 다르면 404다
+      parameters:
+        - name: period
+          in: query
+          required: false
+          description: |
+            조회 기간. 없으면 `hour`다.
+            `hour`·`day`가 아니면 400 `VALIDATION_FAILED`다 (`details.fields[].field`는 `period`). v1처럼 `hour`로 바꿔 주지 않는다
+          schema:
+            type: string
+            enum: [hour, day]
+            default: hour
+      responses:
+        '200':
+          description: VM 사용량 시계열
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VmMetrics'
+              example:
+                period: hour
+                points:
+                  - at: '2026-11-24T09:00:00Z'
+                    cpu_percent: 3.1
+                    memory_mb: 1650
+                    net_in_bps: 12000
+                    net_out_bps: 8000
+                    disk_read_bps: 0
+                    disk_write_bps: 4096
+                  - at: '2026-11-24T09:01:00Z'
+                    cpu_percent: 4.7
+                    memory_mb: 1662
+                    net_in_bps: 15360
+                    net_out_bps: 9216
+                    disk_read_bps: 0
+                    disk_write_bps: 8192
+                  - at: '2026-11-24T09:02:00Z'
+                    cpu_percent: null
+                    memory_mb: null
+                    net_in_bps: null
+                    net_out_bps: null
+                    disk_read_bps: null
+                    disk_write_bps: null
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
+        '503':
+          $ref: './network.yaml#/components/responses/UpstreamUnavailable'
   /api/v2/vm-images:
     get:
       tags: [VM Image]
@@ -458,3 +527,52 @@ components:
         updated_at: { type: string, format: date-time }
         expires_at: { type: string, format: date-time }
         permissions: { $ref: '#/components/schemas/VmPermissions' }
+    VmMetrics:
+      type: object
+      required: [period, points]
+      properties:
+        period:
+          type: string
+          enum: [hour, day]
+          description: 요청한 조회 기간 (생략했으면 `hour`)
+        points:
+          type: array
+          description: 오래된 것부터. 가상화 서버에 아직 VM이 없으면 빈 배열이다
+          items:
+            $ref: '#/components/schemas/VmMetricPoint'
+    VmMetricPoint:
+      type: object
+      description: |
+        한 구간의 평균값. 측정값이 없는 구간(VM이 꺼져 있었다 등)은 그 칸이 `null`이다.
+        `_bps` 칸은 **초당 바이트**(B/s)다. 비트가 아니다
+      required: [at, cpu_percent, memory_mb, net_in_bps, net_out_bps, disk_read_bps, disk_write_bps]
+      properties:
+        at:
+          type: string
+          format: date-time
+          description: 그 구간의 시각 (UTC)
+        cpu_percent:
+          type: [number, 'null']
+          minimum: 0
+          maximum: 100
+          description: VM에 준 vCPU 전체 대비 사용률(%)
+        memory_mb:
+          type: [number, 'null']
+          minimum: 0
+          description: 쓰는 메모리. 칸 이름은 `_mb`지만 값은 MiB다 (`ram_gb`가 GiB인 것과 같다)
+        net_in_bps:
+          type: [number, 'null']
+          minimum: 0
+          description: 받은 네트워크 트래픽 (B/s)
+        net_out_bps:
+          type: [number, 'null']
+          minimum: 0
+          description: 보낸 네트워크 트래픽 (B/s)
+        disk_read_bps:
+          type: [number, 'null']
+          minimum: 0
+          description: 디스크 읽기 (B/s)
+        disk_write_bps:
+          type: [number, 'null']
+          minimum: 0
+          description: 디스크 쓰기 (B/s)
