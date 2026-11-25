@@ -178,6 +178,46 @@ paths:
           $ref: './components/common.yaml#/components/responses/Unauthenticated'
         '404':
           $ref: './components/common.yaml#/components/responses/NotFound'
+  /api/v2/vms/{vm_grn}/credentials:
+    parameters:
+      - $ref: './network.yaml#/components/parameters/VmGrn'
+    get:
+      tags: [VM]
+      operationId: getVmCredentials
+      summary: VM 초기 비밀번호 조회 (4.7)
+      description: |
+        VM을 만들 때 정한 초기 계정과 비밀번호를 준다. 비밀번호는 암호화해 저장하고 응답에는 평문으로 준다.
+
+        - 언제든 다시 볼 수 있고 **볼 때마다 감사 로그를 남긴다**. 감사 기록에 실패하면 비밀번호를 주지 않는다
+        - 응답에 `Cache-Control: no-store`를 붙인다
+        - 값은 만들 때 저장한 것이다. 사용자가 VM 안에서 비밀번호를 바꿔도 이 값은 바뀌지 않는다
+        - `notice`는 비밀번호를 바꾸거나 SSH 키를 쓰라는 안내 문구다. 서버가 정한 문장을 그대로 보여 준다
+        - 상세(4.6)와 나눈 이유: 상세는 자주 불리므로, 비밀번호를 볼 때만 감사 로그를 남기려고다
+
+        권한: 개인 VM은 본인, 팀 VM은 팀원 전원, 관리자 (동작 `view_access_info`).
+        GRN 형식·종류 오류는 400, 없거나 볼 수 없거나 요청 GRN의 소유자 칸이 DB 소유자와 다르면 404다
+      responses:
+        '200':
+          description: 초기 계정과 비밀번호
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VmCredentials'
+              example:
+                user: ubuntu
+                initial_password: example-password-not-real
+                notice: 보안을 위해 비밀번호를 바꾸거나 SSH 키를 등록하세요.
+        '400':
+          $ref: './components/common.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './components/common.yaml#/components/responses/Unauthenticated'
+        '404':
+          $ref: './components/common.yaml#/components/responses/NotFound'
   /api/v2/vms/{vm_grn}/metrics:
     parameters:
       - $ref: './network.yaml#/components/parameters/VmGrn'
@@ -527,6 +567,19 @@ components:
         updated_at: { type: string, format: date-time }
         expires_at: { type: string, format: date-time }
         permissions: { $ref: '#/components/schemas/VmPermissions' }
+    VmCredentials:
+      type: object
+      required: [user, initial_password, notice]
+      properties:
+        user:
+          type: string
+          description: VM 초기 계정 이름 (상세 `ssh.user`와 같다)
+        initial_password:
+          type: string
+          description: 만들 때 정한 초기 비밀번호 (평문)
+        notice:
+          type: string
+          description: 비밀번호 변경·SSH 키 사용을 권하는 안내 문구
     VmMetrics:
       type: object
       required: [period, points]
