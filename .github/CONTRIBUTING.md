@@ -10,7 +10,7 @@ GSMSV v2는 분야별로 저장소를 나눈다.
 |---|---|---|
 | `GSMSV-Server-V2` | Kotlin API 백엔드 | `backend` |
 | `GSMSV-Client-V2` | React 웹 콘솔 | `frontend` |
-| `GSMSV-Infra-V2` | Go로 Proxmox·k3s를 다루는 실행 엔진 | `cloud` |
+| `GSMSV-Infra-V2` | Go로 Proxmox·Kubernetes를 다루는 실행 엔진 | `cloud` |
 | `GSMSV-Contracts-V2` | 저장소끼리 함께 쓰는 약속 (API 명세, 자원 이름 규칙) | `backend`·`frontend`·`cloud` 모두 |
 
 웹 API 명세는 `GSMSV-Contracts-V2`에 **OpenAPI** 형식으로 쓴다. API를 새로 만들거나 바꿀 때는 구현보다 **명세 PR을 먼저** 올린다 (계약 먼저).
